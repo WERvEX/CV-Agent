@@ -13,16 +13,16 @@ import questionary
 
 # Custom style for questionary — uses cyan for questions, green for selections
 Q_STYLE = questionary.Style([
-    ("qmark", "fg:cyan bold"),
-    ("question", "fg:cyan bold"),
-    ("answer", "fg:green bold"),
-    ("pointer", "fg:cyan bold"),
-    ("highlighted", "fg:cyan bold"),
-    ("selected", "fg:green"),
-    ("separator", "fg:dim"),
-    ("instruction", "fg:dim italic"),
+    ("qmark", "fg:ansicyan bold"),
+    ("question", "fg:ansicyan bold"),
+    ("answer", "fg:ansigreen bold"),
+    ("pointer", "fg:ansicyan bold"),
+    ("highlighted", "fg:ansicyan bold"),
+    ("selected", "fg:ansigreen"),
+    ("separator", "fg:ansigray"),
+    ("instruction", "fg:ansigray italic"),
     ("text", ""),
-    ("disabled", "fg:dim italic"),
+    ("disabled", "fg:ansigray italic"),
 ])
 
 
@@ -33,7 +33,7 @@ def _handle_interrupt(func):
             return func(*args, **kwargs)
         except KeyboardInterrupt:
             print("\n")
-            questionary.print("Interrupted by user.", style="fg:yellow")
+            print("Interrupted by user.")
             sys.exit(0)
     return wrapper
 

@@ -1,0 +1,80 @@
+# cv_agent default configuration
+# All values can be overridden via CLI flags or environment variables.
+
+model_variant: yolov8n
+epochs_per_round: 100
+max_rounds: 10
+interaction_mode: ask  # auto | ask
+
+# Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)
+optimize_for_class: null  # e.g., "vehicle", "person"
+
+data:
+  data_yaml: dataset.yaml
+  min_images: 100
+  min_ann_per_class: 50
+  min_pixel_area: 64
+  validate_brightness: true
+  validate_angles: true
+
+initial_hyperparams:
+  lr0: 0.01
+  lrf: 0.01
+  batch: 16
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3.0
+  warmup_momentum: 0.8
+  box: 7.5
+  cls: 0.5
+  dfl: 1.5
+  mosaic: 1.0
+  mixup: 0.0
+  copy_paste: 0.0
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  degrees: 0.0
+  translate: 0.1
+  scale: 0.5
+  shear: 0.0
+  perspective: 0.0
+  flipud: 0.0
+  fliplr: 0.5
+
+optuna:
+  n_trials: 50
+  search_strategy: bayesian  # bayesian | random_walk | simulated_annealing
+  n_startup_trials: 10
+  pruner: median  # median | hyperband | none
+  search_space:
+    lr0: [0.001, 0.1]
+    lrf: [0.001, 0.1]
+    batch: [4, 8, 16, 32]
+    momentum: [0.8, 0.98]
+    weight_decay: [0.0, 0.001]
+    mosaic: [0.0, 1.0]
+    mixup: [0.0, 0.5]
+    copy_paste: [0.0, 0.3]
+    hsv_h: [0.0, 0.05]
+    hsv_s: [0.0, 1.0]
+    hsv_v: [0.0, 1.0]
+    degrees: [0.0, 30.0]
+    translate: [0.0, 0.2]
+    scale: [0.1, 0.9]
+    shear: [0.0, 10.0]
+    perspective: [0.0, 0.001]
+    flipud: [0.0, 0.5]
+    fliplr: [0.0, 1.0]
+
+llm:
+  api_base: https://api.deepseek.com/v1
+  api_key: ""  # Reads from CV_AGENT_LLM_KEY or DEEPSEEK_API_KEY env vars
+  model: deepseek-chat
+  max_tokens: 4096
+  temperature: 0.3
+  max_calls_per_session: 20
+
+mlflow_uri: http://localhost:5000
+experiment_name: cv_agent
+output_root: runs
