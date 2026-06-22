@@ -1,0 +1,122 @@
+# ─────────────────────────────────────────────────────────────
+# Byte-compiled / optimized files
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ─────────────────────────────────────────────────────────────
+# Distribution / packaging
+# ─────────────────────────────────────────────────────────────
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+
+# ─────────────────────────────────────────────────────────────
+# Virtual environments
+# ─────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ─────────────────────────────────────────────────────────────
+# Testing & coverage
+# ─────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ─────────────────────────────────────────────────────────────
+# Type checkers / linters
+# ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.pytest_cache/
+
+# ─────────────────────────────────────────────────────────────
+# Jupyter / IPython
+# ─────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ─────────────────────────────────────────────────────────────
+# cv_agent runtime artifacts (training outputs & experiments)
+# ─────────────────────────────────────────────────────────────
+runs/
+weights/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.mlpackage
+results.csv
+metrics.json
+decision_log.json
+optuna_study.db
+optuna_study.db-journal
+*.log
+
+# Supplemented / downloaded datasets (generated, not source)
+supplemented_data/
+datasets/
+
+# Local secrets & per-user config (keep example cv_agent.yaml tracked)
+.env
+.env.*
+*.local.yaml
+secrets.yaml
+
+# ─────────────────────────────────────────────────────────────
+# MLflow local stores
+# ─────────────────────────────────────────────────────────────
+mlruns/
+mlartifacts/
+mlflow.db
+mlruns.db
+
+# ─────────────────────────────────────────────────────────────
+# IDEs & editors
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────────────────────
+# OS
+# ─────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
