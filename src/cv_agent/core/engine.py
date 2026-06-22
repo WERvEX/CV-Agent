@@ -49,6 +49,7 @@ from cv_agent.ui.console import (
     print_final_summary,
     print_section,
 )
+from cv_agent.ui.live_panel import LivePanel
 from cv_agent.utils.logging_setup import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -115,8 +116,10 @@ class TrainingEngine:
         # Start MLflow session
         self._mlflow.start_session(self._run_dir.name)
 
+        self._live_panel = LivePanel(self)
         try:
-            self._main_loop()
+            with self._live_panel:
+                self._main_loop()
         except KeyboardInterrupt:
             log_warning("Training interrupted by user.")
         except Exception as e:
@@ -162,27 +165,39 @@ class TrainingEngine:
         while self._round_num < config.max_rounds:
             match self._state:
                 case TrainingLoopState.INIT:
+                    self._set_stage("INIT")
                     self._state = TrainingLoopState.VALIDATE_DATA
 
                 case TrainingLoopState.VALIDATE_DATA:
+                    self._set_stage("VALIDATE")
                     self._do_validate_data()
 
                 case TrainingLoopState.DATA_SUPPLEMENT:
+                    self._set_stage("DATA_SUPPLEMENT")
                     self._do_data_supplement()
 
                 case TrainingLoopState.TRAIN:
+                    self._set_stage("TRAIN")
                     self._do_train()
 
                 case TrainingLoopState.EVALUATE:
+                    self._set_stage("EVALUATE")
                     self._do_evaluate()
 
                 case TrainingLoopState.DECIDE:
+                    self._set_stage("DECIDE")
                     self._do_decide()
 
                 case TrainingLoopState.DONE:
                     break
 
         log_info(f"Training loop finished after {self._round_num} round(s).")
+
+    def _set_stage(self, stage: str) -> None:
+        """Update the live panel's stage indicator (no-op if panel inactive)."""
+        panel = getattr(self, "_live_panel", None)
+        if panel is not None:
+            panel.set_stage(stage)
 
     # ------------------------------------------------------------------
     # State handlers

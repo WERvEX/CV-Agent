@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# pre-commit hook: block accidental secret leaks.
+#
+# Scans staged (cached) content for common secret patterns and aborts the
+# commit if any are found. Install once with:
+#     git config core.hooksPath .githooks
+# (this is already done for this repo.)
+
+set -euo pipefail
+
+# Patterns that look like real secrets. Empty placeholders ("", YOUR_KEY, etc.)
+# are intentionally NOT matched so templates stay committable.
+patterns=(
+    'sk-[a-zA-Z0-9_-]{16,}'        # OpenAI / DeepSeek style keys
+    'sk-or-[a-zA-Z0-9_-]{16,}'     # OpenRouter style
+    '[0-9a-f]\{32,\}'              # 32+ hex chars (generic API tokens)
+    'AIza[0-9A-Za-z_-]\{30,\}'     # Google API keys
+    'gh[pousr]_[A-Za-z0-9]\{30,\}' # GitHub tokens
+    '-----BEGIN [A-Z ]*PRIVATE KEY-----'  # private key blocks
+)
+
+# Build a single grep -E pattern string.
+joined=$(IFS='|'; echo "${patterns[*]}")
+
+# Get the list of staged files (text only).
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep -vE '\.(png|jpg|jpeg|gif|bmp|pt|pth|onnx|engine|db)$' || true)
+
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+# Scan staged blob content (not working tree) for secrets.
+found=0
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    # git show :0:<file> reads the staged version regardless of working tree.
+    match=$(git show ":0:$file" 2>/dev/null | grep -nE "$joined" || true)
+    if [ -n "$match" ]; then
+        echo "❌ Possible secret detected in staged file: $file" >&2
+        echo "$match" | head -5 | sed 's/^/    /' >&2
+        echo "" >&2
+        found=1
+    fi
+done <<< "$staged"
+
+if [ "$found" -ne 0 ]; then
+    echo "🚫 Commit aborted: secrets must not be committed." >&2
+    echo "   Put real keys in cv_agent.local.yaml (git-ignored) or an env var." >&2
+    echo "   To bypass (you really know what you're doing): git commit --no-verify" >&2
+    exit 1
+fi
+
+exit 0

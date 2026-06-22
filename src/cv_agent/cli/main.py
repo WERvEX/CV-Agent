@@ -8,9 +8,19 @@ Provides three subcommands:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional
+
+# Force unbuffered/line-buffered stdout BEFORE heavy imports, so Ultralytics'
+# tqdm/print flush in real time during training (not just when a buffer fills).
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):
+    pass  # reconfigure unavailable on this stream
 
 import click
 import yaml
@@ -20,8 +30,27 @@ from cv_agent.core.config import TrainConfig
 from cv_agent.ui.console import console, log_error, log_info, log_success, log_warning, print_banner
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` into ``base`` (override wins).
+
+    Used to layer a git-ignored ``cv_agent.local.yaml`` (which may carry real
+    secrets) on top of the tracked ``cv_agent.yaml`` template.
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
     """Load TrainConfig from YAML file and apply CLI overrides.
+
+    A sibling ``<name>.local.yaml`` (e.g. ``cv_agent.local.yaml``) is merged on
+    top of ``config_path`` if present. This local file is git-ignored and is the
+    intended place to put secrets like the LLM API key — it can never be pushed.
 
     Args:
         config_path: Path to the YAML configuration file.
@@ -42,6 +71,14 @@ def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
     else:
         with open(config_path, "r", encoding="utf-8") as fh:
             config_data = yaml.safe_load(fh) or {}
+
+    # Layer a git-ignored local override file on top (secrets go here).
+    local_override = config_path.with_suffix(".local.yaml")
+    if local_override.exists():
+        log_info(f"Loading local overrides from {local_override.name} (git-ignored).")
+        with open(local_override, "r", encoding="utf-8") as fh:
+            local_data = yaml.safe_load(fh) or {}
+        config_data = _deep_merge(config_data, local_data)
 
     # Apply CLI overrides to top-level config dict
     for key, value in cli_overrides.items():
@@ -99,8 +136,8 @@ def cli(ctx: click.Context, config: Path, interaction: Optional[str]) -> None:
               help="Class name to prioritize in reward function (e.g., 'vehicle').")
 @click.option("--max-rounds", type=int, default=None,
               help="Override max training rounds from config.")
-@click.option("--data-yaml", type=click.Path(exists=True, path_type=Path), default=None,
-              help="Override dataset YAML path.")
+@click.option("--data-yaml", type=click.Path(exists=False, path_type=Path), default=None,
+              help="Override dataset YAML path. If omitted or missing, COCO128 is downloaded for first run.")
 @click.option("--model", type=str, default=None,
               help="Override model variant (e.g., yolov8s).")
 @click.pass_context
@@ -119,6 +156,11 @@ def run(
     _check_env()
     print_banner(__version__)
 
+    # Bootstrap a dataset if none was provided (or the path is missing).
+    # Falls back to downloading COCO128 so the loop can run out of the box.
+    from cv_agent.data.bootstrap import ensure_dataset
+    resolved_data_yaml = ensure_dataset(data_yaml)
+
     # Build CLI overrides dict
     overrides = {}
     if ctx.obj.get("interaction_override"):
@@ -127,8 +169,14 @@ def run(
         overrides["optimize_for_class"] = optimize_for
     if max_rounds:
         overrides["max_rounds"] = max_rounds
-    if data_yaml:
-        overrides["data"] = {"data_yaml": data_yaml}
+    # Merge into the existing `data` section so we don't clobber thresholds
+    # (min_images, min_ann_per_class, ...) defined in cv_agent.yaml.
+    existing_data = {}
+    cfg_path = ctx.obj["config_path"]
+    if cfg_path.exists():
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            existing_data = (yaml.safe_load(fh) or {}).get("data", {}) or {}
+    overrides["data"] = {**existing_data, "data_yaml": resolved_data_yaml}
     if model:
         overrides["model_variant"] = model
 

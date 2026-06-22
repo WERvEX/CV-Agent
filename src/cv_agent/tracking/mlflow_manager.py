@@ -34,6 +34,12 @@ class MLflowManager:
             tracking_uri: MLflow tracking server URI.
             experiment_name: Name of the MLflow experiment.
         """
+        # Cap per-request timeouts so an unreachable server fails in seconds
+        # rather than hanging on the OS TCP connect timeout (~minutes). These
+        # are read when MLflow builds its REST store singleton.
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
+        os.environ.setdefault("MLFLOW_REQUEST_TIMEOUT", "5")
+
         self.tracking_uri = tracking_uri
         self.experiment_name = experiment_name
         self._active: bool = False
@@ -54,6 +60,19 @@ class MLflowManager:
             True if MLflow is active, False if server is unreachable.
         """
         mlflow.set_tracking_uri(self.tracking_uri)
+
+        # Fast pre-flight for HTTP(S) URIs: fail in ~2s instead of hanging on
+        # MLflow's internal retries when nothing is listening. File-based URIs
+        # (e.g. file:./mlruns) never need a network round-trip.
+        if self.tracking_uri.lower().startswith(("http://", "https://")):
+            try:
+                import requests
+                requests.get(self.tracking_uri, timeout=2)
+            except Exception as e:
+                logger.warning(f"MLflow server unreachable at {self.tracking_uri}: {e}")
+                logger.warning("Continuing without MLflow — metrics will be saved locally only.")
+                self._active = False
+                return False
 
         try:
             mlflow.set_experiment(self.experiment_name)

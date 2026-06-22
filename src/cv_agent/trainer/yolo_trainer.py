@@ -82,6 +82,9 @@ class YOLOTrainer:
             "project": str(run_dir.parent),  # e.g., "runs"
             "name": run_dir.name,            # e.g., "exp_20260122_143052"
             "exist_ok": True,
+            # cv_agent renders its own Live progress panel reading results.csv,
+            # so silence Ultralytics' verbose stdout to avoid terminal fighting.
+            "verbose": False,
             # Core hyperparams
             "lr0": hyperparams.lr0,
             "lrf": hyperparams.lrf,

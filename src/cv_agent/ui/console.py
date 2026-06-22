@@ -34,20 +34,37 @@ def _ts() -> str:
 # Styled log helpers
 # ---------------------------------------------------------------------------
 
+def _emit(line: str) -> None:
+    """Print a formatted log line, or buffer it when a Live panel is active.
+
+    When cv_agent.ui.live_panel has a Live region open, direct console.print
+    would corrupt the panel; instead the line is appended to the panel's
+    scrolling footer via push_log_line.
+    """
+    try:
+        from cv_agent.ui import live_panel
+        if live_panel.is_live_active():
+            live_panel.push_log_line(line)
+            return
+    except ImportError:
+        pass
+    console.print(line)
+
+
 def log_info(msg: str) -> None:
-    console.print(f"[dim]{_ts()}[/dim] [bold blue]INFO[/bold blue]    {msg}")
+    _emit(f"[dim]{_ts()}[/dim] [bold blue]INFO[/bold blue]    {msg}")
 
 
 def log_success(msg: str) -> None:
-    console.print(f"[dim]{_ts()}[/dim] [bold green]SUCCESS[/bold green] {msg}")
+    _emit(f"[dim]{_ts()}[/dim] [bold green]SUCCESS[/bold green] {msg}")
 
 
 def log_warning(msg: str) -> None:
-    console.print(f"[dim]{_ts()}[/dim] [bold yellow]WARNING[/bold yellow] {msg}")
+    _emit(f"[dim]{_ts()}[/dim] [bold yellow]WARNING[/bold yellow] {msg}")
 
 
 def log_error(msg: str) -> None:
-    console.print(f"[dim]{_ts()}[/dim] [bold red]ERROR[/bold red]   {msg}")
+    _emit(f"[dim]{_ts()}[/dim] [bold red]ERROR[/bold red]   {msg}")
 
 
 def log_decision(color: str, msg: str) -> None:
@@ -58,7 +75,7 @@ def log_decision(color: str, msg: str) -> None:
         "red": "bold red",
     }
     style = color_map.get(color, "bold white")
-    console.print(f"[dim]{_ts()}[/dim] [{style}]DECIDE[/{style}]  {msg}")
+    _emit(f"[dim]{_ts()}[/dim] [{style}]DECIDE[/{style}]  {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +101,16 @@ def print_banner(version: str) -> None:
 
 def print_section(title: str) -> None:
     """Print a section header."""
+    line = f"[bold white on blue] {title} [/bold white on blue]"
+    try:
+        from cv_agent.ui import live_panel
+        if live_panel.is_live_active():
+            live_panel.push_log_line(line)
+            return
+    except ImportError:
+        pass
     console.print()
-    console.print(f"[bold white on blue] {title} [/bold white on blue]")
+    console.print(line)
     console.print()
 
 

@@ -68,9 +68,16 @@ optuna:
     fliplr: [0.0, 1.0]
 
 llm:
-  api_base: https://api.deepseek.com/v1
-  api_key: ""  # Reads from CV_AGENT_LLM_KEY or DEEPSEEK_API_KEY env vars
-  model: deepseek-chat
+  # ⚠️  NEVER commit a real API key here — this file is tracked and pushed to GitHub.
+  #     Two safe ways to provide the key:
+  #       1. Environment variable (recommended): export CV_AGENT_LLM_KEY="sk-..."
+  #       2. Local override file: create cv_agent.local.yaml (git-ignored) with:
+  #            llm:
+  #              api_key: "sk-your-real-key"
+  #     A pre-commit hook also scans for leaked keys as a backstop.
+  api_base: https://api.deepseek.com
+  api_key: ""  # Leave empty — reads from CV_AGENT_LLM_KEY or DEEPSEEK_API_KEY env vars
+  model: deepseek-v4-flash
   max_tokens: 4096
   temperature: 0.3
   max_calls_per_session: 20
