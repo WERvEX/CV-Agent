@@ -57,7 +57,7 @@ def save_artifacts(
         run_dir: Target run directory.
         weights_source_dir: Directory containing best.pt / last.pt (Ultralytics output).
         metrics: Dictionary of computed metrics to save as metrics.json.
-        decision_log: List of decision records to save/append to decision_log.json.
+        decision_log: Complete list of decision records to save to decision_log.json.
     """
     # Copy weights from Ultralytics output directory
     if weights_source_dir is not None and weights_source_dir.exists():
@@ -75,21 +75,32 @@ def save_artifacts(
             json.dump(metrics, fh, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Saved metrics to {metrics_path}")
 
-    # Save / append decision log
+    # Save decision log. The engine passes the full in-memory log each round, so
+    # overwrite instead of appending to avoid duplicating historical entries.
     if decision_log is not None:
         log_path = run_dir / "decision_log.json"
 
-        # Load existing log if present
-        existing: list[dict[str, Any]] = []
-        if log_path.exists():
-            with open(log_path, "r", encoding="utf-8") as fh:
-                existing = json.load(fh)
-
-        existing.extend(decision_log)
-
         with open(log_path, "w", encoding="utf-8") as fh:
-            json.dump(existing, fh, indent=2, default=str, ensure_ascii=False)
+            json.dump(decision_log, fh, indent=2, default=str, ensure_ascii=False)
         logger.info(f"Updated decision log at {log_path}")
+
+
+def snapshot_best_checkpoint(run_dir: Path, round_num: int) -> Path:
+    """Copy the active best.pt to an immutable per-round snapshot.
+
+    The active ``weights/best.pt`` is reused by later training rounds. Rollback
+    needs a historical copy, not a pointer to that mutable path.
+    """
+    src = run_dir / "weights" / "best.pt"
+    if not src.exists():
+        raise FileNotFoundError(f"Best checkpoint not found: {src}")
+
+    snapshot_dir = run_dir / "best_snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    dst = snapshot_dir / f"round_{round_num:03d}_best.pt"
+    shutil.copy2(src, dst)
+    logger.info(f"Snapshotted best checkpoint to {dst}")
+    return dst
 
 
 def save_data_gap_report(
@@ -149,7 +160,7 @@ def load_latest_decision_log(run_dir: Path) -> list[dict[str, Any]]:
     log_path = run_dir / "decision_log.json"
     if not log_path.exists():
         return []
-    with open(log_path, "r", encoding="utf-8") as fh:
+    with open(log_path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -165,7 +176,7 @@ def load_metrics(run_dir: Path) -> dict[str, Any] | None:
     metrics_path = run_dir / "metrics.json"
     if not metrics_path.exists():
         return None
-    with open(metrics_path, "r", encoding="utf-8") as fh:
+    with open(metrics_path, encoding="utf-8") as fh:
         return json.load(fh)
 
 

@@ -9,9 +9,7 @@ when max rounds are reached or an unrecoverable error occurs.
 
 from __future__ import annotations
 
-import json
 import shutil
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -28,20 +26,19 @@ from cv_agent.data.validator import DatasetValidator, ValidationIssue
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
-from cv_agent.interaction.auto_mode import AutoModeHandler
 from cv_agent.interaction.ask_mode import AskModeHandler
+from cv_agent.interaction.auto_mode import AutoModeHandler
 from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
     load_metrics,
     save_artifacts,
     save_data_gap_report,
-    save_supplement_script,
+    snapshot_best_checkpoint,
 )
 from cv_agent.trainer.evaluator import Evaluator, RoundResult
 from cv_agent.trainer.yolo_trainer import YOLOTrainer
 from cv_agent.ui.console import (
-    console,
     log_error,
     log_info,
     log_success,
@@ -429,7 +426,7 @@ class TrainingEngine:
         # Commit checkpoint as new best
         best_pt = self._run_dir / "weights" / "best.pt"
         if best_pt.exists():
-            self._best_checkpoint = best_pt
+            self._best_checkpoint = snapshot_best_checkpoint(self._run_dir, self._round_num)
             self._best_score = round_result.score
             self._best_round = self._round_num
             log_info(f"New best checkpoint: round {self._round_num}, score={round_result.score:.4f}")

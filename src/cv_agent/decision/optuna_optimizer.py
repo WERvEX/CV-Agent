@@ -14,9 +14,7 @@ import math
 import random
 from pathlib import Path
 
-import numpy as np
-
-from cv_agent.core.config import HyperParams, OptunaConfig, OptunaSearchSpace
+from cv_agent.core.config import HyperParams, OptunaConfig
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +34,7 @@ class OptunaOptimizer:
         self.search_space = config.search_space
         self.study_db = str(study_db) if study_db else "optuna_study.db"
         self._study = None
+        self._last_trial = None
         self._trial_count = 0
 
         # Simulated annealing state
@@ -123,9 +122,9 @@ class OptunaOptimizer:
     def _propose_bayesian(self) -> HyperParams:
         """Use Optuna TPESampler to suggest the next trial."""
         self._init_study()
-        import optuna
 
         trial = self._study.ask()
+        self._last_trial = trial
 
         params_dict = self._trial_to_params(trial)
         self._trial_count += 1
@@ -139,15 +138,15 @@ class OptunaOptimizer:
 
     def _report_result(self, params: HyperParams, score: float) -> None:
         """Report a completed trial result back to Optuna."""
-        import optuna
+        if self._last_trial is None:
+            logger.warning("No pending Optuna trial to report.")
+            return
 
-        # Find the trial number (last asked trial)
-        trial_num = len(self._study.trials)
+        trial_num = self._last_trial.number
 
-        # We use a fixed-trial reporting approach since we can't easily correlate
-        # Optuna trial numbers with our round numbers
         try:
             self._study.tell(trial_num, score)
+            self._last_trial = None
             logger.info(f"Reported score {score:.4f} to Optuna trial #{trial_num}")
         except Exception as e:
             logger.warning(f"Failed to report to Optuna: {e}")

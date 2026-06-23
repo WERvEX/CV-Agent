@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Force unbuffered/line-buffered stdout BEFORE heavy imports, so Ultralytics'
 # tqdm/print flush in real time during training (not just when a buffer fills).
@@ -27,7 +26,7 @@ import yaml
 
 from cv_agent import __version__
 from cv_agent.core.config import TrainConfig
-from cv_agent.ui.console import console, log_error, log_info, log_success, log_warning, print_banner
+from cv_agent.ui.console import log_error, log_info, log_success, log_warning, print_banner
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -43,6 +42,11 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def _build_data_yaml_override(resolved_data_yaml: Path) -> dict:
+    """Build the run-command data override without clobbering local thresholds."""
+    return {"data_yaml": resolved_data_yaml}
 
 
 def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
@@ -69,14 +73,14 @@ def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
         else:
             raise click.ClickException(f"Config file not found: {config_path}")
     else:
-        with open(config_path, "r", encoding="utf-8") as fh:
+        with open(config_path, encoding="utf-8") as fh:
             config_data = yaml.safe_load(fh) or {}
 
     # Layer a git-ignored local override file on top (secrets go here).
     local_override = config_path.with_suffix(".local.yaml")
     if local_override.exists():
         log_info(f"Loading local overrides from {local_override.name} (git-ignored).")
-        with open(local_override, "r", encoding="utf-8") as fh:
+        with open(local_override, encoding="utf-8") as fh:
             local_data = yaml.safe_load(fh) or {}
         config_data = _deep_merge(config_data, local_data)
 
@@ -100,8 +104,8 @@ def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
 def _check_env() -> None:
     """Verify required packages are importable (conda yolo env check)."""
     try:
-        import ultralytics  # noqa: F401
         import torch  # noqa: F401
+        import ultralytics  # noqa: F401
     except ImportError as e:
         log_error(
             f"Required dependency not found: {e}\n"
@@ -122,7 +126,7 @@ def _check_env() -> None:
               help="Override interaction mode.")
 @click.version_option(version=__version__, prog_name="cv_agent", message="%(prog)s v%(version)s")
 @click.pass_context
-def cli(ctx: click.Context, config: Path, interaction: Optional[str]) -> None:
+def cli(ctx: click.Context, config: Path, interaction: str | None) -> None:
     """cv_agent — Automated Closed-Loop YOLO Training CLI.
 
     Combines Ultralytics YOLO, Optuna hyperparameter optimization,
@@ -149,10 +153,10 @@ def cli(ctx: click.Context, config: Path, interaction: Optional[str]) -> None:
 @click.pass_context
 def run(
     ctx: click.Context,
-    optimize_for: Optional[str],
-    max_rounds: Optional[int],
-    data_yaml: Optional[Path],
-    model: Optional[str],
+    optimize_for: str | None,
+    max_rounds: int | None,
+    data_yaml: Path | None,
+    model: str | None,
 ) -> None:
     """Start automated closed-loop training.
 
@@ -175,14 +179,9 @@ def run(
         overrides["optimize_for_class"] = optimize_for
     if max_rounds:
         overrides["max_rounds"] = max_rounds
-    # Merge into the existing `data` section so we don't clobber thresholds
-    # (min_images, min_ann_per_class, ...) defined in cv_agent.yaml.
-    existing_data = {}
-    cfg_path = ctx.obj["config_path"]
-    if cfg_path.exists():
-        with open(cfg_path, "r", encoding="utf-8") as fh:
-            existing_data = (yaml.safe_load(fh) or {}).get("data", {}) or {}
-    overrides["data"] = {**existing_data, "data_yaml": resolved_data_yaml}
+    # Only override the dataset path. _load_config deep-merges this after local
+    # overrides, preserving demo/user thresholds such as min_ann_per_class.
+    overrides["data"] = _build_data_yaml_override(resolved_data_yaml)
     if model:
         overrides["model_variant"] = model
 
@@ -222,15 +221,8 @@ def validate(ctx: click.Context, data_yaml: Path) -> None:
     from cv_agent.core.config import DataConfig
     from cv_agent.data.validator import DatasetValidator
 
-    data_config = DataConfig(data_yaml=data_yaml)
-
-    # Partially load main config for validation thresholds
-    config_path = ctx.obj["config_path"]
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as fh:
-            config_data = yaml.safe_load(fh) or {}
-        if "data" in config_data:
-            data_config = DataConfig(**{**data_config.model_dump(), **config_data["data"]})
+    config = _load_config(ctx.obj["config_path"], {"data": _build_data_yaml_override(data_yaml)})
+    data_config: DataConfig = config.data
 
     validator = DatasetValidator(data_config)
     issues = validator.validate()
