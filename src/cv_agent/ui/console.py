@@ -156,6 +156,56 @@ def print_decision_table(decision: dict[str, Any], round_num: int) -> None:
     console.print()
 
 
+def print_decision_recommendation(
+    decision: dict[str, Any],
+    round_num: int,
+    current_params: dict[str, Any] | None = None,
+    checkpoint_path: str | None = None,
+) -> None:
+    """Print a concise, human-readable AI / heuristic recommendation."""
+    color = decision.get("color", "white")
+    color_style = {"green": "green", "yellow": "yellow", "red": "red"}.get(color, "white")
+    action = decision.get("action", "?")
+    reason = decision.get("reason", "")
+    should_rollback = decision.get("should_rollback", False)
+
+    table = Table(
+        title=f"Round {round_num} — [bold {color_style}]Recommendation ({color.upper()})[/bold {color_style}]",
+        title_style=f"bold {color_style}",
+        show_header=False,
+        padding=(0, 1),
+    )
+    table.add_column("Field", style="bold cyan", width=22)
+    table.add_column("Value", style="bright_white")
+
+    table.add_row("Action", str(action))
+    table.add_row("Reason", reason)
+
+    if should_rollback:
+        rollback_target = checkpoint_path or decision.get("rollback_checkpoint") or "best checkpoint"
+        table.add_row("Rollback", f"[bold yellow]Yes[/bold yellow] → {rollback_target}")
+    else:
+        table.add_row("Rollback", "[dim]No[/dim]")
+
+    next_params = decision.get("next_hyperparams") or {}
+    if current_params and isinstance(next_params, dict):
+        changes = []
+        for key, new_val in next_params.items():
+            old_val = current_params.get(key)
+            if old_val != new_val:
+                changes.append(f"{key}: {old_val} → {new_val}")
+        if changes:
+            table.add_row("Param changes", "\n".join(changes))
+        else:
+            table.add_row("Param changes", "[dim]None (Optuna may propose next round)[/dim]")
+    elif next_params:
+        table.add_row("Param changes", json.dumps(next_params, indent=2))
+
+    console.print()
+    console.print(Panel(table, border_style=color_style))
+    console.print()
+
+
 def print_metrics_table(metrics: dict[str, float], title: str = "Current Metrics") -> None:
     """Print a table of evaluation metrics."""
     table = Table(title=title, title_style="bold cyan")

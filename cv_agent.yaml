@@ -1,9 +1,9 @@
 # cv_agent default configuration
 # All values can be overridden via CLI flags or environment variables.
 
-model_variant: yolov8n
-epochs_per_round: 100  # epochs per round; use a small value (e.g. 3) for quick demos
-max_rounds: 10
+model_variant: yolo26n
+epochs_per_round: 3 # demo default for COCO128 smoke runs; raise for real training
+max_rounds: 7
 interaction_mode: ask # auto | ask
 
 # Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)
@@ -11,8 +11,8 @@ optimize_for_class: null # e.g., "vehicle", "person"
 
 data:
   data_yaml: coco128.yaml # demo dataset; override via --data-yaml for real datasets
-  min_images: 100
-  min_ann_per_class: 50 # raise for real training; lower for tiny demo datasets
+  min_images: 50 # COCO128-friendly; raise for real datasets (e.g. 100+)
+  min_ann_per_class: 1 # COCO128-friendly; raise for real training (e.g. 50+)
   min_pixel_area: 64
   validate_brightness: true
   validate_angles: true

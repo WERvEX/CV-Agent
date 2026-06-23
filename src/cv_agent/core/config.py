@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # YOLO model variants supported
 # ---------------------------------------------------------------------------
 YOLO_VARIANTS = {
+    "yolo26n", "yolo26s", "yolo26m", "yolo26l", "yolo26x",
     "yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x",
     "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x",
 }
@@ -135,8 +136,8 @@ class DataConfig(BaseModel):
     """Dataset configuration and validation thresholds."""
 
     data_yaml: Path = Path("data.yaml")
-    min_images: int = 100
-    min_ann_per_class: int = 50
+    min_images: int = 50
+    min_ann_per_class: int = 1
     min_pixel_area: int = 64
     validate_brightness: bool = True
     validate_angles: bool = True
@@ -146,8 +147,8 @@ class TrainConfig(BaseModel):
     """Top-level configuration aggregating all sub-systems."""
 
     data: DataConfig = Field(default_factory=DataConfig)
-    model_variant: str = "yolov8n"
-    epochs_per_round: int = 100
+    model_variant: str = "yolo26n"
+    epochs_per_round: int = 3
     max_rounds: int = 10
     interaction_mode: Literal["auto", "ask"] = "ask"
     optimize_for_class: str | None = None

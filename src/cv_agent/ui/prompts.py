@@ -6,10 +6,9 @@ and graceful keyboard interrupt handling.
 
 from __future__ import annotations
 
-import sys
-from typing import Any
-
 import questionary
+
+from cv_agent.interaction.types import SessionQuit
 
 # Custom style for questionary — uses cyan for questions, green for selections
 Q_STYLE = questionary.Style([
@@ -25,16 +24,19 @@ Q_STYLE = questionary.Style([
     ("disabled", "fg:ansigray italic"),
 ])
 
+QUIT_LABEL = "Quit training session"
+
 
 def _handle_interrupt(func):
-    """Decorator to catch KeyboardInterrupt and exit gracefully."""
+    """Decorator to catch KeyboardInterrupt and SessionQuit."""
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except SessionQuit:
+            raise
         except KeyboardInterrupt:
             print("\n")
-            print("Interrupted by user.")
-            sys.exit(0)
+            raise SessionQuit("Interrupted by user (Ctrl+C).")
     return wrapper
 
 
@@ -71,6 +73,34 @@ def select(message: str, choices: list[str | questionary.Choice], default: str |
 
 
 @_handle_interrupt
+def select_action(
+    message: str,
+    choices: list[tuple[str, str]],
+    default_key: str | None = None,
+    include_quit: bool = True,
+) -> str:
+    """Select from labeled choices; raises SessionQuit if user picks quit."""
+    q_choices: list[questionary.Choice] = [
+        questionary.Choice(title=label, value=key) for key, label in choices
+    ]
+    if include_quit:
+        q_choices.append(questionary.Choice(title=QUIT_LABEL, value="__quit__"))
+
+    default = default_key if default_key is not None else (choices[0][0] if choices else None)
+
+    result = questionary.select(
+        message,
+        choices=q_choices,
+        default=default,
+        style=Q_STYLE,
+    ).unsafe_ask()
+
+    if result == "__quit__":
+        raise SessionQuit("User chose to quit from prompt.")
+    return result
+
+
+@_handle_interrupt
 def path_input(message: str, only_directories: bool = False, default: str = "") -> str:
     """Ask for a filesystem path with validation. Returns the path string."""
     return questionary.path(
@@ -83,9 +113,12 @@ def path_input(message: str, only_directories: bool = False, default: str = "") 
 
 @_handle_interrupt
 def press_enter_to_continue(message: str = "Press Enter to continue...") -> None:
-    """Block until the user presses Enter."""
-    questionary.text(
+    """Block until the user continues or chooses quit."""
+    action = select_action(
         message,
-        default="",
-        style=Q_STYLE,
-    ).unsafe_ask()
+        [("continue", "Continue")],
+        default_key="continue",
+        include_quit=True,
+    )
+    if action != "continue":
+        raise SessionQuit("User chose to quit.")

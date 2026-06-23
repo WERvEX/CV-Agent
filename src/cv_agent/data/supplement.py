@@ -240,12 +240,10 @@ class DataSupplementer:
         from cv_agent.interaction.auto_mode import AutoModeHandler
 
         if self._interaction is not None and not isinstance(self._interaction, AutoModeHandler):
-            retry = self._interaction.confirm(
-                "Data issues found. Retry validation after importing data? [Y/n]",
-                default=True,
-            )
-            if not retry:
-                log_error("User chose to abort. Run the supplement scripts and re-run cv_agent.")
+            try:
+                retry = self._interaction.confirm_supplement([i.model_dump() for i in issues])
+            except SessionQuit:
+                raise
             return bool(retry)
 
         log_error(

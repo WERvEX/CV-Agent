@@ -115,6 +115,30 @@ def _check_env() -> None:
         sys.exit(1)
 
 
+def _prompt_interaction_mode(config_default: str, cli_override: str | None) -> str:
+    """Prompt for ask vs auto when running interactively without --interaction."""
+    if cli_override:
+        return cli_override
+    if not sys.stdin.isatty():
+        return config_default
+
+    from cv_agent.interaction.types import SessionQuit
+    from cv_agent.ui.prompts import select_action
+
+    try:
+        return select_action(
+            "Choose interaction mode:",
+            [
+                ("ask", "Ask before edit — confirm rollbacks, params, and changes"),
+                ("auto", "Auto — fully autonomous (no prompts)"),
+            ],
+            default_key=config_default,
+        )
+    except SessionQuit:
+        log_warning("Startup cancelled.")
+        sys.exit(0)
+
+
 # ---------------------------------------------------------------------------
 # Click CLI group
 # ---------------------------------------------------------------------------
@@ -149,7 +173,7 @@ def cli(ctx: click.Context, config: Path, interaction: str | None) -> None:
 @click.option("--data-yaml", type=click.Path(exists=False, path_type=Path), default=None,
               help="Override dataset YAML path. If omitted or missing, COCO128 is downloaded for first run.")
 @click.option("--model", type=str, default=None,
-              help="Override model variant (e.g., yolov8s).")
+              help="Override model variant (e.g., yolo26s, yolov8n).")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -171,21 +195,22 @@ def run(
     from cv_agent.data.bootstrap import ensure_dataset
     resolved_data_yaml = ensure_dataset(data_yaml)
 
-    # Build CLI overrides dict
-    overrides = {}
-    if ctx.obj.get("interaction_override"):
-        overrides["interaction_mode"] = ctx.obj["interaction_override"]
+    # Build CLI overrides dict (interaction mode prompted after base config load)
+    overrides: dict = {}
     if optimize_for:
         overrides["optimize_for_class"] = optimize_for
     if max_rounds:
         overrides["max_rounds"] = max_rounds
-    # Only override the dataset path. _load_config deep-merges this after local
-    # overrides, preserving demo/user thresholds such as min_ann_per_class.
     overrides["data"] = _build_data_yaml_override(resolved_data_yaml)
     if model:
         overrides["model_variant"] = model
 
-    config = _load_config(ctx.obj["config_path"], overrides)
+    base_config = _load_config(ctx.obj["config_path"], overrides)
+    interaction_mode = _prompt_interaction_mode(
+        base_config.interaction_mode,
+        ctx.obj.get("interaction_override"),
+    )
+    config = base_config.model_copy(update={"interaction_mode": interaction_mode})
 
     log_info(f"Configuration loaded: model={config.model_variant}, "
              f"interaction={config.interaction_mode}, max_rounds={config.max_rounds}")

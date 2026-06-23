@@ -28,6 +28,7 @@ from cv_agent.decision.optuna_optimizer import OptunaOptimizer
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
 from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
+from cv_agent.interaction.types import SessionQuit
 from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
@@ -123,6 +124,8 @@ class TrainingEngine:
         # prints section headers / decision tables between rounds.
         try:
             self._main_loop()
+        except SessionQuit as e:
+            log_warning(f"Training stopped by user: {e}")
         except KeyboardInterrupt:
             log_warning("Training interrupted by user.")
         except Exception as e:
@@ -240,7 +243,12 @@ class TrainingEngine:
         """DATA_SUPPLEMENT: Generate download scripts, wait for user, retry validation."""
         print_section("Data Supplement Mode")
         issues = getattr(self, "_pending_issues", [])
-        should_retry = self._supplementer.handle(issues, self._run_dir)
+        try:
+            should_retry = self._supplementer.handle(issues, self._run_dir)
+        except SessionQuit:
+            log_warning("Training stopped by user during data supplement.")
+            self._state = TrainingLoopState.DONE
+            return
         if should_retry:
             # User (ask mode) indicated data was fixed — re-validate.
             self._state = TrainingLoopState.VALIDATE_DATA
@@ -351,18 +359,29 @@ class TrainingEngine:
             current_params=self._current_params,
         )
 
-        # --- Propagate decision via interaction handler ---
-        user_feedback = ""
-        if isinstance(self._interaction, AskModeHandler):
-            user_feedback = self._interaction.propagate_decision(
-                decision.to_dict(), self._round_num
-            )
-        else:
-            self._interaction.propagate_decision(decision.to_dict(), self._round_num)
+        checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
 
-        if user_feedback:
-            decision.llm_context = user_feedback
-            self._llm_context_accumulator += f"\n[Round {self._round_num} user feedback]: {user_feedback}"
+        # --- Review decision with user (ask) or auto-approve ---
+        try:
+            review = self._interaction.review_decision(
+                decision=decision.to_dict(),
+                round_num=self._round_num,
+                current_params=self._current_params.model_dump(),
+                checkpoint_path=checkpoint_hint,
+            )
+        except SessionQuit:
+            self._decision_log.append(decision.to_dict())
+            self._mlflow.log_decision(decision.to_dict(), self._round_num)
+            save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
+            self._mlflow.end_round()
+            self._state = TrainingLoopState.DONE
+            return
+
+        if review.feedback:
+            decision.llm_context = review.feedback
+            self._llm_context_accumulator += (
+                f"\n[Round {self._round_num} user feedback]: {review.feedback}"
+            )
 
         # --- Three-state routing ---
         color = decision.color
@@ -372,37 +391,55 @@ class TrainingEngine:
         elif color == DecisionColor.YELLOW.value:
             self._handle_yellow(decision)
         else:  # red
-            self._handle_red(decision)
+            do_rollback = review.rollback_approved and decision.should_rollback
+            self._handle_red(decision, do_rollback=do_rollback)
 
         # --- Record decision ---
         self._decision_log.append(decision.to_dict())
         self._mlflow.log_decision(decision.to_dict(), self._round_num)
 
-        # --- Mutate hyperparameters ---
-        # Ask-mode: confirm before applying changes
-        approved = True
-        if isinstance(self._interaction, AskModeHandler):
-            approved, feedback = self._interaction.confirm_config_change(
-                old_params=self._current_params.model_dump(),
-                new_params=decision.next_hyperparams.model_dump(),
-                context=f"Round {self._round_num} ({color.upper()})",
-            )
-            if feedback:
-                self._llm_context_accumulator += f"\n[Config feedback]: {feedback}"
-
-        if approved:
-            # Use Optuna for the next proposal unless a specific action overrides
-            if decision.action in (DecisionAction.ACCEPT.value, DecisionAction.ESCAPE_LOCAL_OPTIMUM.value):
-                self._current_params = self._optuna.propose(
+        # --- Propose next hyperparameters ---
+        apply_ai = review.apply_recommendation
+        if apply_ai:
+            if decision.action in (
+                DecisionAction.ACCEPT.value,
+                DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
+            ):
+                proposed_params = self._optuna.propose(
                     current_params=self._current_params,
                     current_score=round_result.score,
                     state=color,
                 )
             else:
-                self._current_params = decision.next_hyperparams
+                proposed_params = decision.next_hyperparams
         else:
-            # User rejected — keep current params with small perturbation
-            self._current_params = self._decision_engine._perturb_params(self._current_params)
+            proposed_params = self._current_params
+
+        # Ask-mode: confirm before applying the actual next-round params
+        if isinstance(self._interaction, AskModeHandler):
+            params_changed = proposed_params.model_dump() != self._current_params.model_dump()
+            if params_changed or apply_ai:
+                try:
+                    cfg_review = self._interaction.confirm_config_change(
+                        old_params=self._current_params.model_dump(),
+                        new_params=proposed_params.model_dump(),
+                        context=f"Round {self._round_num} ({color.upper()})",
+                    )
+                except SessionQuit:
+                    save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
+                    self._mlflow.end_round()
+                    self._state = TrainingLoopState.DONE
+                    return
+                if cfg_review.feedback:
+                    self._llm_context_accumulator += f"\n[Config feedback]: {cfg_review.feedback}"
+                if cfg_review.approved:
+                    self._current_params = proposed_params
+                else:
+                    self._current_params = self._decision_engine._perturb_params(self._current_params)
+            else:
+                self._current_params = proposed_params
+        elif apply_ai:
+            self._current_params = proposed_params
 
         # Save decision log
         save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
@@ -439,15 +476,17 @@ class TrainingEngine:
         # Optuna will handle the escape strategy in propose()
         self._red_tracker.reset()
 
-    def _handle_red(self, decision: Decision) -> None:
+    def _handle_red(self, decision: Decision, do_rollback: bool = True) -> None:
         """Red: degradation — diagnose and act. If 3 consecutive Reds, escalate."""
         log_error(f"RED — {decision.reason}")
         is_escalated = self._red_tracker.increment()
 
         log_warning(f"Red count: {self._red_tracker.count}/{self._red_tracker.max_consecutive}")
 
-        if decision.should_rollback:
+        if do_rollback and decision.should_rollback:
             self._do_rollback(decision.rollback_checkpoint)
+        elif decision.should_rollback and not do_rollback:
+            log_info("Rollback skipped per user choice — keeping current weights.")
 
         if is_escalated:
             log_error(

@@ -57,7 +57,7 @@ class YOLOTrainer:
         """Run a single YOLO training session.
 
         Args:
-            model_variant: e.g. "yolov8n", "yolov8s".
+            model_variant: e.g. "yolo26n", "yolov8s".
             data_yaml: Path to dataset YAML.
             hyperparams: HyperParams model instance.
             epochs: Number of epochs for this round.
