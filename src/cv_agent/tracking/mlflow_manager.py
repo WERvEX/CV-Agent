@@ -39,6 +39,10 @@ class MLflowManager:
         # are read when MLflow builds its REST store singleton.
         os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
         os.environ.setdefault("MLFLOW_REQUEST_TIMEOUT", "5")
+        # Newer MLflow rejects the file-store backend by default (maintenance
+        # mode). We fall back to a local file store when no server is running,
+        # so opt in explicitly to keep local tracking working.
+        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
         self.tracking_uri = tracking_uri
         self.experiment_name = experiment_name
@@ -53,26 +57,39 @@ class MLflowManager:
     def start_session(self, run_name: str) -> bool:
         """Start the parent MLflow run for this cv_agent session.
 
+        If the configured tracking URI is an HTTP(S) server that is not
+        reachable, fall back to a local file store (``file:./mlruns``) instead
+        of leaving the global tracking URI pointing at the dead server. This
+        matters because Ultralytics installs its own MLflow callback that
+        inherits the global URI — an unreachable URI makes every training
+        callback stall, hanging ``model.train()`` after the optimizer line.
+
         Args:
             run_name: Display name for the run (e.g., exp_20260122_143052).
 
         Returns:
-            True if MLflow is active, False if server is unreachable.
+            True if MLflow tracking is active (remote or local).
         """
-        mlflow.set_tracking_uri(self.tracking_uri)
+        uri = self.tracking_uri
+        use_remote = True
 
         # Fast pre-flight for HTTP(S) URIs: fail in ~2s instead of hanging on
         # MLflow's internal retries when nothing is listening. File-based URIs
         # (e.g. file:./mlruns) never need a network round-trip.
-        if self.tracking_uri.lower().startswith(("http://", "https://")):
+        if uri.lower().startswith(("http://", "https://")):
             try:
                 import requests
-                requests.get(self.tracking_uri, timeout=2)
+                requests.get(uri, timeout=2)
             except Exception as e:
-                logger.warning(f"MLflow server unreachable at {self.tracking_uri}: {e}")
-                logger.warning("Continuing without MLflow — metrics will be saved locally only.")
-                self._active = False
-                return False
+                logger.warning(f"MLflow server unreachable at {uri}: {e}")
+                logger.warning("Falling back to local file store (./mlruns) — run `mlflow ui` to view.")
+                use_remote = False
+
+        # Set the GLOBAL tracking URI. Only point it at the remote server when
+        # the pre-flight passed; otherwise use a local file store so both
+        # cv_agent and Ultralytics' built-in callback log locally without any
+        # network round-trip.
+        mlflow.set_tracking_uri(uri if use_remote else "file:./mlruns")
 
         try:
             mlflow.set_experiment(self.experiment_name)
@@ -80,10 +97,11 @@ class MLflowManager:
             self._parent_run_id = run.info.run_id
             self._active_run_id = run.info.run_id
             self._active = True
-            logger.info(f"MLflow session started: {run_name} (run_id={self._parent_run_id})")
+            store = "remote" if use_remote else "local"
+            logger.info(f"MLflow session started ({store}): {run_name} (run_id={self._parent_run_id})")
             return True
         except Exception as e:
-            logger.warning(f"MLflow server unreachable at {self.tracking_uri}: {e}")
+            logger.warning(f"MLflow run could not be started: {e}")
             logger.warning("Continuing without MLflow — metrics will be saved locally only.")
             self._active = False
             return False

@@ -80,9 +80,15 @@ def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
             local_data = yaml.safe_load(fh) or {}
         config_data = _deep_merge(config_data, local_data)
 
-    # Apply CLI overrides to top-level config dict
+    # Apply CLI overrides on top. Use deep-merge so a nested override like
+    # {"data": {"data_yaml": ...}} augments rather than replaces the data
+    # section (preserving local threshold overrides such as min_ann_per_class).
     for key, value in cli_overrides.items():
-        if value is not None:
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(config_data.get(key), dict):
+            config_data[key] = _deep_merge(config_data[key], value)
+        else:
             config_data[key] = value
 
     try:

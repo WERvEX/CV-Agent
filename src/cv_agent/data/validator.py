@@ -90,6 +90,71 @@ class DatasetValidator:
         return issues
 
     # ------------------------------------------------------------------
+    # Path resolution (Ultralytics-compatible)
+    # ------------------------------------------------------------------
+
+    def _dataset_root(self, dataset_info: dict) -> Path:
+        """Resolve the dataset root (the YAML ``path`` field).
+
+        Follows Ultralytics conventions: an absolute ``path`` is used as-is; a
+        relative ``path`` is resolved against (in order) the YAML's directory,
+        the Ultralytics ``datasets_dir`` (where auto-downloaded datasets like
+        COCO128 land), and finally the cwd. The first existing directory wins;
+        if none exist, the YAML-dir-relative candidate is returned so that
+        downstream checks report a clear "0 images" rather than crashing.
+        """
+        path = dataset_info.get("path", "")
+        if not path:
+            return self.config.data_yaml.parent
+
+        p = Path(path)
+        if p.is_absolute():
+            return p
+
+        yaml_dir = self.config.data_yaml.parent
+        cand = yaml_dir / path
+        if cand.exists():
+            return cand
+
+        # Ultralytics downloads datasets into SETTINGS['datasets_dir']; a bare
+        # name like "coco128" resolves there, not next to the YAML.
+        try:
+            from ultralytics.utils import SETTINGS
+            ds_dir = Path(SETTINGS["datasets_dir"])
+            cand2 = ds_dir / path
+            if cand2.exists():
+                return cand2
+        except Exception:
+            pass
+
+        return cand  # may not exist; callers handle gracefully
+
+    def _resolve_split_path(self, dataset_info: dict, split: str) -> Path | None:
+        """Resolve the image directory for a train/val/test split.
+
+        Absolute split paths are used directly; relative ones resolve against
+        the dataset root (see :meth:`_dataset_root`).
+        """
+        split_path = dataset_info.get(split, "")
+        if not split_path:
+            return None
+        sp = Path(split_path)
+        if sp.is_absolute():
+            return sp
+        return self._dataset_root(dataset_info) / split_path
+
+    def _resolve_labels_dir(self, images_path: Path) -> Path:
+        """Resolve the labels directory for an images directory.
+
+        Tries the YOLO convention of replacing ``images`` with ``labels`` in
+        the path, then the sibling ``labels/<split>`` layout.
+        """
+        labels_dir = Path(str(images_path).replace("images", "labels"))
+        if labels_dir.exists():
+            return labels_dir
+        return images_path.parent / "labels" / images_path.name
+
+    # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
 
@@ -98,13 +163,9 @@ class DatasetValidator:
         issues: list[ValidationIssue] = []
 
         for split in ("train", "val"):
-            split_path = dataset_info.get(split, "")
-            if not split_path:
+            full_path = self._resolve_split_path(dataset_info, split)
+            if full_path is None:
                 continue
-
-            # Resolve relative to the YAML file's directory
-            yaml_dir = self.config.data_yaml.parent
-            full_path = yaml_dir / split_path if not Path(split_path).is_absolute() else Path(split_path)
 
             # The path might be "path/to/images" — count image files
             if full_path.exists():
@@ -114,14 +175,7 @@ class DatasetValidator:
                     # Might be a txt file listing paths
                     images = self._count_from_list(full_path)
             else:
-                # Try dataset root + split path
-                root = dataset_info.get("path", "")
-                alt_path = Path(root) / Path(split_path).relative_to(Path(split_path).anchor) \
-                    if Path(split_path).is_absolute() else Path(root) / split_path
-                if alt_path.exists() and alt_path.is_dir():
-                    images = self._count_images(alt_path)
-                else:
-                    images = 0
+                images = 0
 
             if images < self.config.min_images:
                 issues.append(ValidationIssue(
@@ -140,14 +194,8 @@ class DatasetValidator:
         issues: list[ValidationIssue] = []
 
         for split in ("train", "val"):
-            split_path = dataset_info.get(split, "")
-            if not split_path:
-                continue
-
-            yaml_dir = self.config.data_yaml.parent
-            full_path = yaml_dir / split_path if not Path(split_path).is_absolute() else Path(split_path)
-
-            if not full_path.exists() or not full_path.is_dir():
+            full_path = self._resolve_split_path(dataset_info, split)
+            if full_path is None or not full_path.exists() or not full_path.is_dir():
                 continue
 
             images = set(
@@ -155,11 +203,7 @@ class DatasetValidator:
                 if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
             )
 
-            # Determine labels directory
-            labels_dir = full_path.parent / "labels" / full_path.name
-            if not labels_dir.exists():
-                # YOLO convention: replace 'images' with 'labels' in path
-                labels_dir = Path(str(full_path).replace("images", "labels"))
+            labels_dir = self._resolve_labels_dir(full_path)
 
             labels = set()
             if labels_dir.exists():
@@ -172,12 +216,19 @@ class DatasetValidator:
             missing_images = labels - images
 
             if missing_labels:
+                # A few label-less images (e.g. background/negative samples) are
+                # normal and YOLO trains fine on them; only flag as an error
+                # when a meaningful fraction is missing.
+                frac = len(missing_labels) / len(images) if images else 1.0
+                severity = "error" if frac > 0.05 else "warning"
                 issues.append(ValidationIssue(
-                    severity="error",
+                    severity=severity,
                     category="missing_annotations",
-                    detail=(f"{split}: {len(missing_labels)} images have no label file. "
+                    detail=(f"{split}: {len(missing_labels)} images have no label file "
+                            f"({frac*100:.1f}% of {len(images)}). "
                             f"Examples: {list(missing_labels)[:5]}"),
-                    suggestion="Annotate missing images using CVAT, labelImg, or Roboflow Annotate.",
+                    suggestion="Annotate missing images using CVAT, labelImg, or Roboflow Annotate, "
+                               "or confirm they are intentional background samples.",
                 ))
 
             if missing_images and len(missing_images) > len(labels) * 0.1:
@@ -202,19 +253,11 @@ class DatasetValidator:
 
         class_counts: dict[int, int] = {}
         for split in ("train", "val"):
-            split_path = dataset_info.get(split, "")
-            if not split_path:
+            full_path = self._resolve_split_path(dataset_info, split)
+            if full_path is None:
                 continue
 
-            yaml_dir = self.config.data_yaml.parent
-            full_path = yaml_dir / split_path if not Path(split_path).is_absolute() else Path(split_path)
-
-            # Find labels dir
-            labels_dir = Path(str(full_path).replace("images", "labels"))
-            if not labels_dir.exists():
-                # Try same dir with _labels suffix or parent/labels/child
-                labels_dir = full_path.parent / "labels" / full_path.name
-
+            labels_dir = self._resolve_labels_dir(full_path)
             if not labels_dir.exists():
                 continue
 
@@ -231,6 +274,7 @@ class DatasetValidator:
                 except Exception:
                     continue
 
+        ok_count = 0
         for cls_id, count in sorted(class_counts.items()):
             cls_name = names.get(cls_id, f"class_{cls_id}")
             if count < self.config.min_ann_per_class:
@@ -243,7 +287,16 @@ class DatasetValidator:
                                 f"Roboflow Universe has many '{cls_name}' datasets."),
                 ))
             else:
-                logger.info(f"Class '{cls_name}': {count} annotations ✓")
+                ok_count += 1
+
+        # Single-line summary instead of one line per class (avoids dozens of
+        # log lines that make startup look like a hang).
+        total_classes = len(class_counts)
+        total_anns = sum(class_counts.values())
+        logger.info(
+            f"Class distribution: {total_classes} classes, {total_anns} annotations "
+            f"total — {ok_count} OK, {total_classes - ok_count} below min"
+        )
 
         return issues
 
@@ -256,17 +309,11 @@ class DatasetValidator:
         min_area = self.config.min_pixel_area
 
         for split in ("train", "val"):
-            split_path = dataset_info.get(split, "")
-            if not split_path:
+            full_path = self._resolve_split_path(dataset_info, split)
+            if full_path is None:
                 continue
 
-            yaml_dir = self.config.data_yaml.parent
-            full_path = yaml_dir / split_path if not Path(split_path).is_absolute() else Path(split_path)
-
-            labels_dir = Path(str(full_path).replace("images", "labels"))
-            if not labels_dir.exists():
-                labels_dir = full_path.parent / "labels" / full_path.name
-
+            labels_dir = self._resolve_labels_dir(full_path)
             if not labels_dir.exists():
                 continue
 
@@ -317,12 +364,8 @@ class DatasetValidator:
         sample_limit = 50
 
         for split in ("train", "val"):
-            split_path = dataset_info.get(split, "")
-            if not split_path:
-                continue
-            yaml_dir = self.config.data_yaml.parent
-            full_path = yaml_dir / split_path if not Path(split_path).is_absolute() else Path(split_path)
-            if not full_path.exists() or not full_path.is_dir():
+            full_path = self._resolve_split_path(dataset_info, split)
+            if full_path is None or not full_path.exists() or not full_path.is_dir():
                 continue
 
             for img_file in full_path.iterdir():

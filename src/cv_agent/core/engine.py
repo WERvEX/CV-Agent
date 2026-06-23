@@ -117,9 +117,15 @@ class TrainingEngine:
         self._mlflow.start_session(self._run_dir.name)
 
         self._live_panel = LivePanel(self)
+        # NOTE: the Rich Live panel is currently disabled because it deadlocks
+        # with Ultralytics' stdout/tqdm output on Windows (model.train() stalls
+        # on its first print while the Live refresh thread holds the console).
+        # Re-enable once the two are reconciled (e.g. alternate screen buffer,
+        # or pausing Live around model.train()). For now, fall back to plain
+        # console output: Ultralytics prints its own epoch progress, and cv_agent
+        # prints section headers / decision tables between rounds.
         try:
-            with self._live_panel:
-                self._main_loop()
+            self._main_loop()
         except KeyboardInterrupt:
             log_warning("Training interrupted by user.")
         except Exception as e:
@@ -162,7 +168,11 @@ class TrainingEngine:
         self._current_params = config.initial_hyperparams
         self._round_num = 0
 
-        while self._round_num < config.max_rounds:
+        # Drive the state machine until it reaches DONE. Basing the loop guard
+        # on the state (not round_num) ensures the final round still runs through
+        # EVALUATE and DECIDE — otherwise max_rounds==N skips them for round N
+        # because _do_train has already incremented _round_num to N.
+        while self._state is not TrainingLoopState.DONE:
             match self._state:
                 case TrainingLoopState.INIT:
                     self._set_stage("INIT")
@@ -178,6 +188,10 @@ class TrainingEngine:
 
                 case TrainingLoopState.TRAIN:
                     self._set_stage("TRAIN")
+                    # Guard: stop starting new rounds once we've hit max_rounds.
+                    if self._round_num >= config.max_rounds:
+                        self._state = TrainingLoopState.DONE
+                        continue
                     self._do_train()
 
                 case TrainingLoopState.EVALUATE:
@@ -229,9 +243,14 @@ class TrainingEngine:
         """DATA_SUPPLEMENT: Generate download scripts, wait for user, retry validation."""
         print_section("Data Supplement Mode")
         issues = getattr(self, "_pending_issues", [])
-        self._supplementer.handle(issues, self._run_dir)
-        # Return to validation to retry
-        self._state = TrainingLoopState.VALIDATE_DATA
+        should_retry = self._supplementer.handle(issues, self._run_dir)
+        if should_retry:
+            # User (ask mode) indicated data was fixed — re-validate.
+            self._state = TrainingLoopState.VALIDATE_DATA
+        else:
+            # Auto mode, or user chose to abort: stop the session cleanly.
+            log_error("Aborting training session due to unresolved dataset validation errors.")
+            self._state = TrainingLoopState.DONE
 
     def _do_train(self) -> None:
         """TRAIN: Run a single YOLO training round."""
@@ -444,12 +463,24 @@ class TrainingEngine:
         """Roll back to the best known checkpoint."""
         best_pt = self._run_dir / "weights" / "best.pt"
 
+        def _safe_copy(src: Path) -> bool:
+            """Copy src to best_pt, skipping (no-op) if they're the same file."""
+            try:
+                if src.resolve() == best_pt.resolve():
+                    log_info(f"Best checkpoint already in place: {best_pt}")
+                    return True
+                shutil.copy2(src, best_pt)
+                return True
+            except OSError as e:
+                log_warning(f"Rollback copy failed ({src} → {best_pt}): {e}")
+                return False
+
         if self._best_checkpoint and self._best_checkpoint.exists():
-            shutil.copy2(self._best_checkpoint, best_pt)
-            log_info(f"Rolled back to best checkpoint (round {self._best_round}).")
+            if _safe_copy(self._best_checkpoint):
+                log_info(f"Rolled back to best checkpoint (round {self._best_round}).")
         elif checkpoint_path and Path(checkpoint_path).exists():
-            shutil.copy2(checkpoint_path, best_pt)
-            log_info(f"Rolled back to specified checkpoint: {checkpoint_path}")
+            if _safe_copy(Path(checkpoint_path)):
+                log_info(f"Rolled back to specified checkpoint: {checkpoint_path}")
         else:
             log_warning("No checkpoint available for rollback.")
 
@@ -457,10 +488,9 @@ class TrainingEngine:
         """3 consecutive Reds: force rollback, generate LLM data gap report, trigger supplement."""
         # Force rollback
         if self._best_checkpoint and self._best_checkpoint.exists():
-            shutil.copy2(
-                self._best_checkpoint,
-                self._run_dir / "weights" / "best.pt",
-            )
+            best_pt = self._run_dir / "weights" / "best.pt"
+            if self._best_checkpoint.resolve() != best_pt.resolve():
+                shutil.copy2(self._best_checkpoint, best_pt)
             log_info("Hard rollback to best checkpoint completed.")
 
         # Generate Data Gap Report via LLM Advisor

@@ -2,7 +2,9 @@
 
 Based on ValidationIssue categories, generates executable download scripts
 for Roboflow Universe, OpenImages, or HuggingFace datasets. In ask mode,
-blocks for user confirmation; in auto mode, prints scripts and continues.
+blocks for user confirmation; in auto mode, generates scripts and returns
+False so the engine aborts cleanly (unattended runs cannot fix missing data
+by re-validating in a loop).
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from typing import Protocol
 
 from cv_agent.data.validator import ValidationIssue
 from cv_agent.tracking.run_dir import save_supplement_script
-from cv_agent.ui.console import log_info, log_warning, print_validation_issues
+from cv_agent.ui.console import log_error, log_info, log_warning, print_validation_issues
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -185,7 +187,11 @@ class DataSupplementer:
         """Handle validation issues - generate scripts and/or wait for user.
 
         Returns:
-            True if supplement complete and retry should happen.
+            True if validation should be retried (e.g. the user fixed the data
+            in ask mode and confirmed a retry); False if the engine should
+            abort. Auto mode always returns False — an unattended run cannot
+            fix missing data by re-validating in a tight loop, so we generate
+            the scripts and let the engine exit cleanly instead of spinning.
         """
         print_validation_issues([i.model_dump() for i in issues])
 
@@ -229,12 +235,21 @@ class DataSupplementer:
         if script_count > 0:
             log_info(f"Generated {script_count} supplement script(s) in {run_dir / 'supplement_scripts/'}")
 
-        # Interaction
-        if self._interaction is not None:
-            self._interaction.press_enter(
-                "Import the missing data and press Enter to retry validation, or Ctrl+C to abort."
-            )
-            return True
+        # Interaction: ask mode lets the user fix data and retry; auto mode
+        # cannot, so abort after generating the scripts.
+        from cv_agent.interaction.auto_mode import AutoModeHandler
 
-        log_info("Auto mode: printing supplement scripts. Re-validating on next loop iteration.")
-        return True
+        if self._interaction is not None and not isinstance(self._interaction, AutoModeHandler):
+            retry = self._interaction.confirm(
+                "Data issues found. Retry validation after importing data? [Y/n]",
+                default=True,
+            )
+            if not retry:
+                log_error("User chose to abort. Run the supplement scripts and re-run cv_agent.")
+            return bool(retry)
+
+        log_error(
+            "Auto mode: dataset validation failed and cannot be auto-resolved. "
+            "Run the generated supplement scripts, add the data, then re-run cv_agent."
+        )
+        return False

@@ -82,9 +82,14 @@ class YOLOTrainer:
             "project": str(run_dir.parent),  # e.g., "runs"
             "name": run_dir.name,            # e.g., "exp_20260122_143052"
             "exist_ok": True,
-            # cv_agent renders its own Live progress panel reading results.csv,
-            # so silence Ultralytics' verbose stdout to avoid terminal fighting.
-            "verbose": False,
+            "workers": 0,  # Windows DataLoader stability (spawn-based workers)
+            # Disable Ultralytics' built-in MLflow autolog — cv_agent manages
+            # its own MLflow tracking and the file-store warning is noisy.
+            "plots": False,
+            # Let Ultralytics pick the optimizer ('auto') — it scales lr0 to a
+            # sensible value for the chosen optimizer. Pinning 'AdamW' while
+            # passing a SGD-style lr0=0.01 causes gradient explosion (AdamW
+            # wants ~1e-3). cv_agent's lr0/lrf are still applied on top.
             # Core hyperparams
             "lr0": hyperparams.lr0,
             "lrf": hyperparams.lrf,
@@ -126,10 +131,16 @@ class YOLOTrainer:
             logger.error(f"Training failed: {e}")
             raise RuntimeError(f"YOLO training failed: {e}") from e
 
-        # Resolve artifact paths
-        # Ultralytics saves to: project/name/weights/best.pt, etc.
-        weights_dir = run_dir / "weights"
+        # Newer Ultralytics (>=8.3) inserts a task sub-directory (e.g. "detect")
+        # and reinterprets `project`, so the actual save dir is rarely the
+        # `project/name` we asked for. Read the real location from the trainer
+        # and copy the artifacts we care about into cv_agent's run_dir so the
+        # rest of the pipeline (evaluator, run_dir, mlflow) finds them where it
+        # expects.
+        actual_save_dir = Path(getattr(getattr(model, "trainer", None), "save_dir", run_dir))
+        self._copy_artifacts(actual_save_dir, run_dir)
 
+        weights_dir = run_dir / "weights"
         artifacts = TrainArtifacts(
             best_pt=weights_dir / "best.pt",
             last_pt=weights_dir / "last.pt",
@@ -150,6 +161,36 @@ class YOLOTrainer:
 
         logger.info(f"Training round complete. Best weights: {artifacts.best_pt}")
         return artifacts
+
+    @staticmethod
+    def _copy_artifacts(src_dir: Path, dst_dir: Path) -> None:
+        """Copy training artifacts from Ultralytics' save dir into run_dir.
+
+        Handles the task-subdirectory path mismatch in newer Ultralytics. Only
+        copies files that exist; missing ones are silently skipped so the
+        downstream existence check can report them.
+        """
+        import shutil
+
+        if not src_dir.exists() or src_dir.resolve() == dst_dir.resolve():
+            return
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        (dst_dir / "weights").mkdir(parents=True, exist_ok=True)
+
+        # results.csv + args.yaml live at the save-dir root
+        for fname in ("results.csv", "args.yaml"):
+            s = src_dir / fname
+            if s.exists():
+                shutil.copy2(s, dst_dir / fname)
+
+        # weights/best.pt, weights/last.pt
+        src_weights = src_dir / "weights"
+        if src_weights.exists():
+            for fname in ("best.pt", "last.pt"):
+                s = src_weights / fname
+                if s.exists():
+                    shutil.copy2(s, dst_dir / "weights" / fname)
 
     def validate(
         self,
