@@ -35,6 +35,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cv_agent.ui.console import console
+from cv_agent.ui.terminal_charts import parse_results_history, sparkline
 
 if TYPE_CHECKING:
     from cv_agent.core.engine import TrainingEngine
@@ -150,6 +151,7 @@ class LivePanel:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._latest_csv: dict[str, Any] = {}
+        self._latest_history: dict[str, list[float]] = {}
         self._live: Live | None = None
         self._stage: str = "INIT"
 
@@ -199,6 +201,7 @@ class LivePanel:
         while not self._stop.is_set():
             if csv_path is not None:
                 self._latest_csv = parse_results_row(csv_path)
+                self._latest_history = parse_results_history(csv_path)
             self._stop.wait(_POLL_INTERVAL)
 
     # -- rendering --------------------------------------------------------
@@ -237,18 +240,33 @@ class LivePanel:
         t.add_column("Field", style="bold", width=16)
         t.add_column("Value", style="white")
         csv = self._latest_csv
+        hist = getattr(self, "_latest_history", {})
         cfg = self._engine._config
 
         epoch = csv.get("epoch")
         epoch_str = f"{epoch}/{cfg.epochs_per_round}" if epoch is not None else f"-/{cfg.epochs_per_round}"
         t.add_row("epoch", epoch_str)
-        t.add_row("train_loss", f"{csv.get('train_loss', 0):.4f}" if "train_loss" in csv else "-")
-        t.add_row("val_loss", f"{csv.get('val_loss', 0):.4f}" if "val_loss" in csv else "-")
-        t.add_row("mAP50", f"{csv['map50']:.4f}" if "map50" in csv else "-")
-        t.add_row("mAP50-95", f"{csv['map50_95']:.4f}" if "map50_95" in csv else "-")
-        t.add_row("precision", f"{csv['precision']:.4f}" if "precision" in csv else "-")
-        t.add_row("recall", f"{csv['recall']:.4f}" if "recall" in csv else "-")
-        t.add_row("lr", f"{csv['lr']:.5f}" if "lr" in csv else "-")
+
+        def _metric_row(label: str, csv_key: str, hist_key: str, *, fmt: str = ".4f") -> None:
+            if csv_key not in csv:
+                t.add_row(label, "-")
+                return
+            val = csv[csv_key]
+            line = f"{val:{fmt}}"
+            series = hist.get(hist_key, [])
+            if len(series) > 1:
+                line += f"  [dim]{sparkline(series)}[/dim]"
+            t.add_row(label, line)
+
+        _metric_row("train_loss", "train_loss", "train_loss")
+        _metric_row("val_loss", "val_loss", "val_loss")
+        _metric_row("mAP50", "map50", "map50")
+        _metric_row("mAP50-95", "map50_95", "map50_95")
+        if "precision" in csv:
+            t.add_row("precision", f"{csv['precision']:.4f}")
+        if "recall" in csv:
+            t.add_row("recall", f"{csv['recall']:.4f}")
+        _metric_row("lr", "lr", "lr", fmt=".5f")
         return t
 
     def _render_right_table(self) -> Table:
@@ -267,6 +285,9 @@ class LivePanel:
         t.add_row("completed", str(len(eng._history)))
         t.add_row("best_round", str(eng._best_round))
         t.add_row("best_score", f"{eng._best_score:.4f}")
+        if eng._history:
+            round_scores = [r.score for r in eng._history]
+            t.add_row("score trend", sparkline(round_scores))
         t.add_row("🟢 green", str(counts["green"]))
         t.add_row("🟡 yellow", str(counts["yellow"]))
         t.add_row("🔴 red", str(counts["red"]))

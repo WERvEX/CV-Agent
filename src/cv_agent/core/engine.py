@@ -54,6 +54,7 @@ from cv_agent.ui.console import (
     log_success,
     log_warning,
     print_final_summary,
+    print_round_evaluation,
     print_section,
 )
 from cv_agent.ui.live_panel import LivePanel
@@ -400,6 +401,20 @@ class TrainingEngine:
         )
 
         comparison = self._evaluator.compare(round_result, self._history)
+
+        best_hist = comparison.best_historical
+        print_round_evaluation(
+            round_num=self._round_num,
+            score=round_result.score,
+            metrics=round_result.metrics,
+            delta_percent=comparison.delta_percent if best_hist else None,
+            best_score=best_hist.score if best_hist else None,
+            best_round=best_hist.round_num if best_hist else None,
+            overfitting=comparison.overfitting,
+            underfitting=comparison.underfitting,
+            optimize_for_class=self._config.optimize_for_class,
+            optimize_class_id=self._evaluator.optimize_for_class_id,
+        )
 
         # Log metrics to MLflow
         self._mlflow.log_metrics(round_result.metrics, step=self._round_num)
@@ -921,11 +936,14 @@ class TrainingEngine:
 
     def _print_summary(self) -> None:
         """Print final training session summary."""
+        round_scores = [(r.round_num, r.score) for r in self._history]
         print_final_summary(
             rounds_run=self._round_num,
             best_round=self._best_round,
             best_score=self._best_score,
             run_dir=self._run_dir or Path("runs"),
+            decision_log=self._decision_log,
+            round_scores=round_scores,
         )
 
     @staticmethod

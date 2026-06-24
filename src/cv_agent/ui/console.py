@@ -17,6 +17,8 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from cv_agent.ui.terminal_charts import format_delta, sparkline
+
 # Singleton console for the entire application
 console = Console()
 
@@ -114,7 +116,15 @@ def print_section(title: str) -> None:
     console.print()
 
 
-def print_final_summary(rounds_run: int, best_round: int, best_score: float, run_dir: Path) -> None:
+def print_final_summary(
+    rounds_run: int,
+    best_round: int,
+    best_score: float,
+    run_dir: Path,
+    *,
+    decision_log: list[dict[str, Any]] | None = None,
+    round_scores: list[tuple[int, float]] | None = None,
+) -> None:
     """Print a final summary table at the end of a session."""
     table = Table(title="Training Session Summary", title_style="bold cyan")
     table.add_column("Metric", style="bold", width=25)
@@ -124,9 +134,16 @@ def print_final_summary(rounds_run: int, best_round: int, best_score: float, run
     table.add_row("Best round", f"#{best_round}")
     table.add_row("Best reward score", f"{best_score:.4f}")
     table.add_row("Output directory", str(run_dir))
+    if round_scores:
+        scores = [s for _, s in round_scores]
+        table.add_row("Score trend", sparkline(scores))
 
     console.print()
     console.print(table)
+
+    if decision_log:
+        print_decision_timeline(decision_log, round_scores=round_scores)
+
     console.print()
 
 
@@ -188,22 +205,128 @@ def print_decision_recommendation(
         table.add_row("Rollback", "[dim]No[/dim]")
 
     next_params = decision.get("proposed_hyperparams") or decision.get("next_hyperparams") or {}
+    has_param_diff = False
     if current_params and isinstance(next_params, dict):
-        changes = []
-        for key, new_val in next_params.items():
-            old_val = current_params.get(key)
-            if old_val != new_val:
-                changes.append(f"{key}: {old_val} → {new_val}")
-        if changes:
-            table.add_row("Param changes", "\n".join(changes))
-        else:
+        has_param_diff = any(
+            current_params.get(key) != new_val for key, new_val in next_params.items()
+        )
+        if not has_param_diff:
             table.add_row("Param changes", "[dim]None (next round keeps current params)[/dim]")
     elif next_params:
         table.add_row("Param changes", json.dumps(next_params, indent=2))
 
     console.print()
     console.print(Panel(table, border_style=color_style))
+    if has_param_diff and current_params and isinstance(next_params, dict):
+        from cv_agent.interaction.diff_renderer import render_diff
+
+        console.print(render_diff(current_params, next_params, title="Hyperparameter Diff"))
     console.print()
+
+
+def print_round_evaluation(
+    *,
+    round_num: int,
+    score: float,
+    metrics: dict[str, float],
+    delta_percent: float | None,
+    best_score: float | None = None,
+    best_round: int | None = None,
+    overfitting: bool = False,
+    underfitting: bool = False,
+    optimize_for_class: str | None = None,
+    optimize_class_id: int | None = None,
+) -> None:
+    """Print evaluation summary after a training round completes."""
+    table = Table(
+        title=f"Round {round_num} Evaluation",
+        title_style="bold cyan",
+        show_header=True,
+    )
+    table.add_column("Metric", style="bold", width=22)
+    table.add_column("Value", style="bright_white", width=18)
+
+    table.add_row("Reward score", f"{score:.4f}")
+    table.add_row("Δ vs historical best", format_delta(delta_percent))
+    if best_score is not None and best_round is not None:
+        table.add_row("Historical best", f"round #{best_round} — {best_score:.4f}")
+
+    diagnostics: list[str] = []
+    if overfitting:
+        diagnostics.append("[yellow]overfitting[/yellow]")
+    if underfitting:
+        diagnostics.append("[yellow]underfitting[/yellow]")
+    table.add_row(
+        "Diagnostics",
+        ", ".join(diagnostics) if diagnostics else "[dim]none[/dim]",
+    )
+
+    for key, label in (
+        ("mAP50", "mAP50"),
+        ("mAP50_95", "mAP50-95"),
+        ("precision", "precision"),
+        ("recall", "recall"),
+    ):
+        if key in metrics:
+            table.add_row(label, f"{metrics[key]:.4f}")
+
+    if optimize_for_class and optimize_class_id is not None:
+        target_key = f"mAP50_class_{optimize_class_id}"
+        if target_key in metrics:
+            table.add_row(
+                f"Target ({optimize_for_class})",
+                f"mAP50={metrics[target_key]:.4f}",
+            )
+
+    per_class = sorted(
+        (k, v) for k, v in metrics.items() if k.startswith("mAP50_class_")
+    )
+    if per_class and not optimize_for_class:
+        preview = ", ".join(f"{k.split('_')[-1]}={v:.3f}" for k, v in per_class[:6])
+        if len(per_class) > 6:
+            preview += f", … (+{len(per_class) - 6} classes)"
+        table.add_row("Per-class mAP50", preview)
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def print_decision_timeline(
+    decision_log: list[dict[str, Any]],
+    *,
+    round_scores: list[tuple[int, float]] | None = None,
+) -> None:
+    """Print a compact timeline of Green/Yellow/Red decisions across rounds."""
+    if not decision_log:
+        return
+
+    scores_by_round = dict(round_scores or [])
+    table = Table(title="Decision Timeline", title_style="bold cyan")
+    table.add_column("Round", style="bold", width=6)
+    table.add_column("Color", width=8)
+    table.add_column("Score", width=10)
+    table.add_column("Action", width=28)
+    table.add_column("Reason", overflow="fold")
+
+    color_style = {"green": "green", "yellow": "yellow", "red": "red"}
+
+    for idx, entry in enumerate(decision_log, start=1):
+        color = entry.get("color", "?")
+        style = color_style.get(color, "white")
+        round_num = idx
+        score = scores_by_round.get(round_num)
+        score_str = f"{score:.4f}" if score is not None else "-"
+        table.add_row(
+            str(round_num),
+            f"[{style}]{color.upper()}[/{style}]",
+            score_str,
+            str(entry.get("action", "?")),
+            str(entry.get("reason", "")),
+        )
+
+    console.print()
+    console.print(table)
 
 
 def print_metrics_table(metrics: dict[str, float], title: str = "Current Metrics") -> None:
