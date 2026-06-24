@@ -30,6 +30,11 @@ from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
 from cv_agent.interaction.mode_control import offer_mode_control
 from cv_agent.interaction.types import SessionQuit
+from cv_agent.tracking.checkpoint_manager import (
+    CheckpointInfo,
+    CheckpointManager,
+    hyperparams_from_manifest,
+)
 from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
@@ -90,20 +95,38 @@ class TrainingEngine:
         self._current_params: HyperParams | None = None
         self._decision_log: list[dict[str, Any]] = []
         self._llm_context_accumulator: str = ""
+        self._checkpoint_manager: CheckpointManager | None = None
+        self._fork_weights: Path | None = None
 
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
 
     def run(self, config: TrainConfig) -> None:
-        """Execute the full closed-loop training session."""
-        self._config = config
-
-        # Configure logging with file output
+        """Execute a new closed-loop training session from pretrained weights."""
+        self._fork_weights = None
+        self._round_num = 0
         ts_dir = create_run_dir(config.output_root)
-        log_file = ts_dir / "cv_agent.log"
+        self._begin_session(config, ts_dir)
+
+    def run_from_checkpoint(self, config: TrainConfig, checkpoint: CheckpointInfo) -> None:
+        """Start a new experiment fine-tuning from a saved checkpoint."""
+        self._fork_weights = checkpoint.weights_path
+        if checkpoint.hyperparams:
+            self._current_params = hyperparams_from_manifest(checkpoint.hyperparams)
+        ts_dir = create_run_dir(config.output_root)
+        log_info(
+            f"Forking from checkpoint '{checkpoint.label}' "
+            f"(score={checkpoint.score:.4f}, round={checkpoint.round})"
+        )
+        self._begin_session(config, ts_dir)
+
+    def _begin_session(self, config: TrainConfig, run_dir: Path) -> None:
+        """Shared setup for fresh and forked training sessions."""
+        self._config = config
+        log_file = run_dir / "cv_agent.log"
         setup_logging(log_file=log_file)
-        self._run_dir = ts_dir
+        self._run_dir = run_dir
 
         log_info("Starting cv_agent training session...")
         log_info(f"Run directory: {self._run_dir}")
@@ -111,20 +134,13 @@ class TrainingEngine:
             f"Model={config.model_variant}, epochs/round={config.epochs_per_round}, "
             f"max_rounds={config.max_rounds}, interaction={config.interaction_mode}"
         )
+        if self._fork_weights:
+            log_info(f"Initial weights: {self._fork_weights}")
 
         self._setup_subsystems(config)
-
-        # Start MLflow session
         self._mlflow.start_session(self._run_dir.name)
-
         self._live_panel = LivePanel(self)
-        # NOTE: the Rich Live panel is currently disabled because it deadlocks
-        # with Ultralytics' stdout/tqdm output on Windows (model.train() stalls
-        # on its first print while the Live refresh thread holds the console).
-        # Re-enable once the two are reconciled (e.g. alternate screen buffer,
-        # or pausing Live around model.train()). For now, fall back to plain
-        # console output: Ultralytics prints its own epoch progress, and cv_agent
-        # prints section headers / decision tables between rounds.
+
         try:
             self._main_loop()
         except SessionQuit as e:
@@ -158,6 +174,7 @@ class TrainingEngine:
 
         self._config = config
         self._run_dir = run_dir
+        self._fork_weights = None
         log_file = run_dir / "cv_agent.log"
         setup_logging(log_file=log_file)
 
@@ -223,8 +240,8 @@ class TrainingEngine:
         """Execute the training state machine loop."""
         config = self._config
         self._state = TrainingLoopState.INIT
-        self._current_params = config.initial_hyperparams
-        self._round_num = 0
+        if self._current_params is None:
+            self._current_params = config.initial_hyperparams
 
         # Drive the state machine until it reaches DONE. Basing the loop guard
         # on the state (not round_num) ensures the final round still runs through
@@ -406,6 +423,7 @@ class TrainingEngine:
         self._last_round_result = round_result
         self._last_comparison = comparison
         self._history.append(round_result)
+        self._maybe_record_top_checkpoint(round_result)
         self._state = TrainingLoopState.DECIDE
 
     def _do_decide(self) -> None:
@@ -435,6 +453,7 @@ class TrainingEngine:
                 current_mode=self._config.interaction_mode,
                 round_num=self._round_num,
                 auto_timeout_seconds=self._config.auto_prompt_seconds,
+                on_save_checkpoint=self._prompt_save_checkpoint_manual,
             )
         except SessionQuit:
             self._mlflow.end_round()
@@ -666,8 +685,11 @@ class TrainingEngine:
     # ------------------------------------------------------------------
 
     def _resolve_initial_weights(self) -> Path | None:
-        """Checkpoint to fine-tune from on rounds after the first."""
+        """Checkpoint to fine-tune from on rounds after the first (or fork on round 1)."""
         if self._round_num <= 1:
+            if self._fork_weights and self._fork_weights.exists():
+                log_info(f"Round {self._round_num}: fine-tuning from forked checkpoint {self._fork_weights.name}")
+                return self._fork_weights
             return None
 
         if self._best_checkpoint and self._best_checkpoint.exists():
@@ -686,6 +708,62 @@ class TrainingEngine:
 
         log_warning(f"Round {self._round_num}: no checkpoint found — falling back to pretrained weights.")
         return None
+
+    def _maybe_record_top_checkpoint(self, round_result: RoundResult) -> None:
+        """Record round score in Top-N checkpoint leaderboard if qualified."""
+        if self._checkpoint_manager is None:
+            return
+        weights = self._run_dir / "weights" / "best.pt"
+        if not weights.exists():
+            weights = self._run_dir / "weights" / "last.pt"
+        if not weights.exists():
+            return
+        self._checkpoint_manager.record_score(
+            weights_src=weights,
+            score=round_result.score,
+            round_num=round_result.round_num,
+            hyperparams=self._current_params.model_dump(),
+        )
+
+    def save_checkpoint_manual(self, name: str) -> Path | None:
+        """Save current weights and hyperparameters under a user-chosen name."""
+        if self._checkpoint_manager is None:
+            log_error("Checkpoint manager not initialized.")
+            return None
+        weights = self._run_dir / "weights" / "best.pt"
+        if not weights.exists():
+            weights = self._run_dir / "weights" / "last.pt"
+        if not weights.exists():
+            log_error("No weights available to save.")
+            return None
+        score = 0.0
+        round_result = getattr(self, "_last_round_result", None)
+        if round_result is not None:
+            score = round_result.score
+        try:
+            dest = self._checkpoint_manager.save_manual(
+                name=name,
+                weights_src=weights,
+                score=score,
+                round_num=self._round_num,
+                hyperparams=self._current_params.model_dump(),
+            )
+            log_success(f"Checkpoint saved: {dest}")
+            self._save_session_state()
+            return dest
+        except (ValueError, FileNotFoundError) as e:
+            log_error(str(e))
+            return None
+
+    def _prompt_save_checkpoint_manual(self) -> None:
+        """Ask-mode hook: prompt for a name and save the current checkpoint."""
+        from cv_agent.ui.prompts import text
+
+        name = text("Name for this checkpoint save:", default="").strip()
+        if not name:
+            log_warning("Save cancelled — empty name.")
+            return
+        self.save_checkpoint_manual(name)
 
     def _save_session_state(self) -> None:
         """Write session_state.json for cv_agent resume."""
@@ -757,10 +835,16 @@ class TrainingEngine:
         # Decision engine
         self._decision_engine = ThreeStateDecisionEngine()
 
-        # Optuna optimizer
+        # Optuna optimizer — per-run study DB to avoid cross-experiment pollution
         self._optuna = OptunaOptimizer(
             config=config.optuna,
-            study_db=config.output_root / "optuna_study.db",
+            study_db=self._run_dir / "optuna_study.db",
+        )
+
+        # Checkpoint manager
+        self._checkpoint_manager = CheckpointManager(
+            run_dir=self._run_dir,
+            config=config.checkpoints,
         )
 
         # LLM advisor

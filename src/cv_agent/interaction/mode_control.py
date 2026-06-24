@@ -7,6 +7,8 @@ import sys
 import time
 from typing import Literal
 
+from collections.abc import Callable
+
 from cv_agent.interaction.types import SessionQuit
 from cv_agent.ui.console import console, log_info
 from cv_agent.ui.prompts import select_action
@@ -20,6 +22,7 @@ def offer_mode_control(
     current_mode: ModeChoice,
     round_num: int,
     auto_timeout_seconds: float = DEFAULT_AUTO_PROMPT_SECONDS,
+    on_save_checkpoint: Callable[[], None] | None = None,
 ) -> ModeChoice:
     """Let the user pick Ask or Auto for reviewing **this round** before decision review runs.
 
@@ -38,17 +41,24 @@ def offer_mode_control(
         return current_mode
 
     if current_mode == "ask":
-        choice = select_action(
-            f"Round {round_num} training finished. How should this round be reviewed?",
-            [
+        while True:
+            choices: list[tuple[str, str]] = [
                 ("ask", "Review in Ask mode (decision + hyperparameters)"),
                 ("auto", "Switch to Auto (auto-approve this round)"),
-            ],
-            default_key="ask",
-        )
-        if choice == "auto":
-            log_info("Switching to Auto mode for this round's review.")
-        return choice
+            ]
+            if on_save_checkpoint is not None:
+                choices.append(("save", "Save current model and hyperparameters"))
+            choice = select_action(
+                f"Round {round_num} training finished. How should this round be reviewed?",
+                choices,
+                default_key="ask",
+            )
+            if choice == "save" and on_save_checkpoint is not None:
+                on_save_checkpoint()
+                continue
+            if choice == "auto":
+                log_info("Switching to Auto mode for this round's review.")
+            return choice
 
     return _auto_mode_checkpoint(round_num=round_num, timeout=auto_timeout_seconds)
 

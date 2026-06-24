@@ -1,9 +1,10 @@
 """CLI entry point for cv_agent.
 
-Provides three subcommands:
-    run       — Full closed-loop automated training
-    validate  — Dataset validation dry run
-    resume    — Resume from a prior experiment directory
+Provides subcommands:
+    run              — Full closed-loop automated training
+    validate         — Dataset validation dry run
+    resume           — Resume from a prior experiment directory (shortcut)
+    list-checkpoints — List saved Top-N and manual checkpoints
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ except (AttributeError, ValueError):
 
 import click
 import yaml
+
+from typing import Literal
 
 from cv_agent import __version__
 from cv_agent.core.config import TrainConfig
@@ -139,6 +142,115 @@ def _prompt_interaction_mode(config_default: str, cli_override: str | None) -> s
         sys.exit(0)
 
 
+StartMode = Literal["fresh", "resume", "from-checkpoint"]
+
+
+def _prompt_start_mode(
+    config: TrainConfig,
+    start_override: StartMode | None,
+    run_dir_override: Path | None,
+    checkpoint_id_override: str | None,
+) -> tuple[StartMode, Path | None, str | None]:
+    """Prompt for fresh / resume / fork-from-checkpoint startup."""
+    if start_override:
+        if start_override == "resume" and run_dir_override is None and sys.stdin.isatty():
+            from cv_agent.tracking.checkpoint_manager import list_resumable_runs
+            from cv_agent.ui.prompts import select_action
+
+            runs = list_resumable_runs(config.output_root)
+            if not runs:
+                log_warning("No resumable experiments — starting fresh.")
+                return "fresh", None, None
+            choices = [(str(r), r.name) for r in runs]
+            try:
+                picked = select_action("Select experiment to resume:", choices, default_key=str(runs[-1]))
+            except SessionQuit:
+                sys.exit(0)
+            return "resume", Path(picked), None
+        if start_override == "from-checkpoint" and not checkpoint_id_override:
+            raise click.ClickException("--checkpoint-id is required for --start from-checkpoint.")
+        return start_override, run_dir_override, checkpoint_id_override
+
+    if not sys.stdin.isatty():
+        return "fresh", None, None
+
+    from cv_agent.interaction.types import SessionQuit
+    from cv_agent.tracking.checkpoint_manager import list_checkpoints, list_resumable_runs
+    from cv_agent.ui.prompts import select_action
+
+    try:
+        mode = select_action(
+            "Choose how to start training:",
+            [
+                ("fresh", "New experiment from pretrained weights"),
+                ("resume", "Resume an existing experiment (same run directory)"),
+                ("from-checkpoint", "New experiment from a saved checkpoint"),
+            ],
+            default_key="fresh",
+        )
+    except SessionQuit:
+        log_warning("Startup cancelled.")
+        sys.exit(0)
+
+    if mode == "fresh":
+        return "fresh", None, None
+
+    if mode == "resume":
+        runs = list_resumable_runs(config.output_root)
+        if not runs:
+            log_warning("No resumable experiments found — starting fresh.")
+            return "fresh", None, None
+        choices = [(str(r), f"{r.name}") for r in runs]
+        try:
+            picked = select_action("Select experiment to resume:", choices, default_key=str(runs[-1]))
+        except SessionQuit:
+            sys.exit(0)
+        return "resume", Path(picked), None
+
+    # from-checkpoint
+    all_ckpt = list_checkpoints(config.output_root)
+    forkable = [c for c in all_ckpt if c.kind in ("top", "manual")]
+    if not forkable:
+        log_warning("No saved checkpoints found — starting fresh from pretrained weights.")
+        return "fresh", None, None
+    choices = [(c.id, c.label) for c in forkable]
+    try:
+        picked_id = select_action("Select checkpoint to fine-tune from:", choices, default_key=forkable[0].id)
+    except SessionQuit:
+        sys.exit(0)
+    return "from-checkpoint", None, picked_id
+
+
+def _execute_training_start(
+    config: TrainConfig,
+    start_mode: StartMode,
+    run_dir: Path | None,
+    checkpoint_id: str | None,
+) -> None:
+    """Dispatch to fresh run, resume, or fork-from-checkpoint."""
+    from cv_agent.core.engine import TrainingEngine
+    from cv_agent.tracking.checkpoint_manager import find_checkpoint_by_id
+
+    engine = TrainingEngine()
+
+    if start_mode == "resume":
+        if run_dir is None:
+            raise click.ClickException("Resume requires --run-dir.")
+        engine.resume(run_dir.resolve(), config)
+        return
+
+    if start_mode == "from-checkpoint":
+        if not checkpoint_id:
+            raise click.ClickException("from-checkpoint requires --checkpoint-id.")
+        info = find_checkpoint_by_id(config.output_root, checkpoint_id)
+        if info is None:
+            raise click.ClickException(f"Checkpoint not found: {checkpoint_id}")
+        engine.run_from_checkpoint(config, info)
+        return
+
+    engine.run(config)
+
+
 # ---------------------------------------------------------------------------
 # Click CLI group
 # ---------------------------------------------------------------------------
@@ -174,6 +286,16 @@ def cli(ctx: click.Context, config: Path, interaction: str | None) -> None:
               help="Override dataset YAML path. If omitted or missing, COCO128 is downloaded for first run.")
 @click.option("--model", type=str, default=None,
               help="Override model variant (e.g., yolo26s, yolov8n).")
+@click.option(
+    "--start",
+    type=click.Choice(["fresh", "resume", "from-checkpoint"]),
+    default=None,
+    help="Startup mode (default: interactive prompt or fresh).",
+)
+@click.option("--run-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="Run directory for --start resume.")
+@click.option("--checkpoint-id", type=str, default=None,
+              help="Checkpoint id for --start from-checkpoint (see list-checkpoints).")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -181,6 +303,9 @@ def run(
     max_rounds: int | None,
     data_yaml: Path | None,
     model: str | None,
+    start: str | None,
+    run_dir: Path | None,
+    checkpoint_id: str | None,
 ) -> None:
     """Start automated closed-loop training.
 
@@ -219,11 +344,17 @@ def run(
     if config.optimize_for_class:
         log_info(f"Optimizing for class: [bold cyan]{config.optimize_for_class}[/bold cyan]")
 
-    # Import here to avoid heavy deps on --help
-    from cv_agent.core.engine import TrainingEngine
+    start_mode, resume_dir, ckpt_id = _prompt_start_mode(
+        config,
+        start_override=start,
+        run_dir_override=run_dir,
+        checkpoint_id_override=checkpoint_id,
+    )
 
-    engine = TrainingEngine()
-    engine.run(config)
+    if start_mode == "resume" and resume_dir is None and run_dir:
+        resume_dir = run_dir
+
+    _execute_training_start(config, start_mode, resume_dir, ckpt_id or checkpoint_id)
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +417,40 @@ def resume(ctx: click.Context, run_dir: Path) -> None:
     )
     config = base_config.model_copy(update={"interaction_mode": interaction_mode})
 
-    from cv_agent.core.engine import TrainingEngine
+    _execute_training_start(config, "resume", run_dir.resolve(), None)
 
-    engine = TrainingEngine()
-    engine.resume(run_dir, config)
+
+# ---------------------------------------------------------------------------
+# cv_agent list-checkpoints
+# ---------------------------------------------------------------------------
+
+@cli.command("list-checkpoints")
+@click.pass_context
+def list_checkpoints_cmd(ctx: click.Context) -> None:
+    """List Top-N, manual, and resumable experiment checkpoints."""
+    config = _load_config(ctx.obj["config_path"], {})
+    from cv_agent.tracking.checkpoint_manager import list_checkpoints
+    from rich.table import Table
+    from cv_agent.ui.console import console
+
+    entries = list_checkpoints(config.output_root)
+    if not entries:
+        log_info("No checkpoints found under output_root.")
+        return
+
+    table = Table(title="Saved checkpoints", show_header=True)
+    table.add_column("ID", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Score")
+    table.add_column("Round")
+    table.add_column("Label")
+
+    for e in entries:
+        table.add_row(
+            e.id,
+            e.kind,
+            f"{e.score:.4f}",
+            str(e.round),
+            e.label,
+        )
+    console.print(table)

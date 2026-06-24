@@ -143,6 +143,14 @@ class DataConfig(BaseModel):
     validate_angles: bool = True
 
 
+class CheckpointConfig(BaseModel):
+    """Checkpoint Top-N and manual save settings."""
+
+    top_n: int = Field(default=5, ge=1, le=50)
+    auto_save_top: bool = True
+    manual_save_dir: str = "manual"
+
+
 class TrainConfig(BaseModel):
     """Top-level configuration aggregating all sub-systems."""
 
@@ -159,6 +167,7 @@ class TrainConfig(BaseModel):
     mlflow_uri: str = "http://localhost:5000"
     experiment_name: str = "cv_agent"
     output_root: Path = Path("runs")
+    checkpoints: CheckpointConfig = Field(default_factory=CheckpointConfig)
 
     @field_validator("model_variant")
     @classmethod

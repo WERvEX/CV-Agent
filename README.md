@@ -107,7 +107,22 @@ cv_agent validate --data-yaml path/to/dataset.yaml
 
 # Resume a prior experiment
 cv_agent resume --run-dir runs/exp_20260122_143052
+
+# List saved Top-N and manual checkpoints
+cv_agent list-checkpoints
+
+# Non-interactive: new experiment from a saved checkpoint
+cv_agent run --start from-checkpoint --checkpoint-id exp_20260122_143052:top:1
+
+# Non-interactive: resume
+cv_agent run --start resume --run-dir runs/exp_20260122_143052
 ```
+
+At startup (interactive TTY), `cv_agent run` prompts for three modes:
+
+1. **New from pretrained** — default; uses `model_variant` weights (e.g. `yolo26n.pt`)
+2. **Resume experiment** — same `exp_*` directory; restores round, hyperparameters, Optuna study
+3. **New from saved checkpoint** — new `exp_*` directory; fine-tunes from a Top-N or manual save
 
 ### CLI reference
 
@@ -115,15 +130,19 @@ cv_agent resume --run-dir runs/exp_20260122_143052
 cv_agent [--config PATH] [--interaction auto|ask] [--version] <command>
 
 Commands:
-  run        Start automated closed-loop training
-  validate   Run dataset validation only (dry run)
-  resume     Resume from a prior experiment directory
+  run               Start automated closed-loop training
+  validate          Run dataset validation only (dry run)
+  resume            Resume from a prior experiment directory
+  list-checkpoints  List Top-N, manual, and resumable checkpoints
 
 run options:
-  --optimize-for TEXT    Class name to prioritize (e.g. "vehicle")
-  --max-rounds INT       Override max training rounds
-  --data-yaml PATH       Override dataset YAML path
-  --model TEXT           Override model variant (yolov8n/s/m/l/x)
+  --optimize-for TEXT       Class name to prioritize (e.g. "vehicle")
+  --max-rounds INT          Override max training rounds
+  --data-yaml PATH          Override dataset YAML path
+  --model TEXT              Override model variant (yolo26n, yolov8n, …)
+  --start fresh|resume|from-checkpoint   Startup mode (non-interactive)
+  --run-dir PATH            Run directory for --start resume
+  --checkpoint-id TEXT      Checkpoint id for --start from-checkpoint
 ```
 
 ## Run Modes
@@ -195,6 +214,38 @@ reward = 0.3 × global_mAP50 + 1.7 × target_class_mAP50
 ```
 
 Without `--optimize-for`, `reward = global_mAP50`.
+
+## Checkpoints and Top-N saves
+
+Each experiment directory can store:
+
+```
+runs/exp_*/
+  weights/best.pt              # active weights (mutable during training)
+  best_snapshots/              # immutable per-round copies for RED rollback
+  checkpoints/
+    leaderboard.json           # Top-N score ranking
+    top/rank01_score0.4500_round3.pt
+    manual/my_save/weights.pt  # user-named saves (Ask mode)
+    manual/my_save/manifest.json
+  session_state.json           # resume same experiment
+```
+
+- **Top-N** (`checkpoints.top_n`, default 5): after each round, if the score
+  qualifies, weights are copied into `checkpoints/top/` and the leaderboard is updated.
+- **Manual save** (Ask mode): at DECIDE, choose *Save current model and hyperparameters*
+  and enter a name.
+- **`best_snapshots/`** vs **`checkpoints/top/`**: snapshots support rollback history;
+  Top-N is a score-ranked library for picking models to fork.
+
+Configure in `cv_agent.yaml`:
+
+```yaml
+checkpoints:
+  top_n: 5
+  auto_save_top: true
+  manual_save_dir: manual
+```
 
 ## Configuration
 
