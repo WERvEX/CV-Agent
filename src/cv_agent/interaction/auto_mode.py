@@ -34,7 +34,7 @@ class AutoModeHandler:
         current_params: dict[str, Any] | None,
         checkpoint_path: str | None,
     ) -> DecisionReview:
-        """Auto-approve the AI recommendation without blocking."""
+        """Auto-approve the controller recommendation without blocking."""
         self.propagate_decision(decision, round_num)
         should_rollback = bool(decision.get("should_rollback"))
         log_info(

@@ -44,8 +44,9 @@ initial_hyperparams:
   fliplr: 0.5
 
 optuna:
-  n_trials: 50
-  search_strategy: bayesian # bayesian | random_walk | simulated_annealing
+  n_trials: 50 # max Optuna ask() calls per run; after budget, proposals fall back
+  search_strategy: bayesian # legacy: non-bayesian values map to YELLOW escape strategy
+  yellow_strategy: random_walk # random_walk | simulated_annealing | bayesian
   n_startup_trials: 10
   pruner: median # median | hyperband | none
   search_space:
@@ -91,3 +92,9 @@ checkpoints:
   top_n: 5
   auto_save_top: true
   manual_save_dir: manual
+
+decision:
+  green_threshold_pct: 3.0
+  red_threshold_pct: -5.0
+  red_escalation_count: 3
+  yellow_resets_red_count: true

@@ -1,242 +1,301 @@
-# cv_agent — Automated Closed-Loop YOLO Training CLI
+# cv_agent
 
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![Ultralytics](https://img.shields.io/badge/ultralytics-YOLOv8%2F11-orange.svg)](https://github.com/ultralytics/ultralytics)
-[![Optuna](https://img.shields.io/badge/Optuna-hyperparameter%20opt-green.svg)](https://optuna.org/)
-[![MLflow](https://img.shields.io/badge/MLflow-experiment%20tracking-blue.svg)](https://mlflow.org/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Ultralytics](https://img.shields.io/badge/Ultralytics-YOLO-orange.svg)](https://github.com/ultralytics/ultralytics)
+[![Optuna](https://img.shields.io/badge/Optuna-hyperparameter%20search-green.svg)](https://optuna.org/)
+[![MLflow](https://img.shields.io/badge/MLflow-tracking-blue.svg)](https://mlflow.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](pyproject.toml)
 
-**cv_agent** is an automated closed-loop CLI training system built on Ultralytics
-YOLO. It combines **Optuna Bayesian hyperparameter optimization** with
-**LLM-based strategic reasoning** to continuously improve an object-detection
-model round after round, with a three-state (Green / Yellow / Red) decision
-engine driving checkpoint commit, local-optimum escape, and rollback.
+**Automated closed-loop YOLO object-detection training.**
 
-It runs two ways: fully autonomous (`auto`) or human-in-the-loop (`ask`,
-with change diffs and Y/n gates).
+`cv_agent` trains Ultralytics YOLO models in repeated rounds: validate data, train, evaluate, classify the outcome (Green / Yellow / Red), propose the next hyperparameters, and repeat. [Optuna](https://optuna.org/) drives hyperparameter search; a rule-based controller handles checkpoint commits, rollbacks, and local-optimum escape. An optional LLM assists only when training hits repeated failures and data gaps are suspected.
+
+Run fully unattended (`auto`) or stay in the loop (`ask`) with diffs, confirmations, and natural-language guidance.
 
 ---
 
 ## Table of Contents
 
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [Run Modes](#run-modes)
-- [Three-State Decision System](#three-state-decision-system)
-- [Data Validation & Supplement](#data-validation--supplement)
-- [Single-Class Optimization](#single-class-optimization---optimize-for)
-- [Configuration](#configuration)
-- [Secrets & API Keys](#secrets--api-keys)
-- [Experiment Directory](#experiment-directory)
-- [LLM Backend](#llm-backend)
-- [MLflow Tracking](#mlflow-tracking)
+- [Features](#features)
+- [How It Works](#how-it-works)
 - [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+- [Interaction Modes](#interaction-modes)
+- [Decision System](#decision-system)
+- [Hyperparameter Optimization](#hyperparameter-optimization)
+- [Checkpoints & Resume](#checkpoints--resume)
+- [Dataset Validation & Supplement](#dataset-validation--supplement)
+- [Single-Class Optimization](#single-class-optimization)
+- [Configuration](#configuration)
+- [LLM Integration](#llm-integration)
+- [MLflow Tracking](#mlflow-tracking)
+- [Project Layout](#project-layout)
+- [Development](#development)
+- [Security](#security)
+- [License](#license)
 
 ---
 
-## Architecture
+## Features
+
+- **Closed-loop training** — multi-round train → evaluate → decide without manual scripting
+- **Three-state decisions** — Green (commit), Yellow (escape local optimum), Red (rollback / recovery)
+- **Optuna integration** — Bayesian search on Green; random walk / simulated annealing / Bayesian on Yellow
+- **Per-class metrics** — validation enrichment with per-class mAP for targeted optimization
+- **Checkpoint management** — Top-N leaderboard, per-round snapshots, manual named saves
+- **Resume & fork** — continue an experiment or start a new run from a saved checkpoint
+- **Dataset validation** — image/label checks, class counts, object size, optional quality heuristics
+- **Data supplement mode** — generates download/annotation helper scripts when data is insufficient
+- **Ask or Auto** — human-in-the-loop with param diffs and guidance parsing, or hands-off runs
+- **MLflow logging** — remote server or transparent local fallback
+- **Optional LLM** — data-gap analysis after 3 consecutive Reds (heuristic fallback if no API key)
+
+---
+
+## How It Works
+
+Each training session runs a state machine until `max_rounds` is reached or the user quits:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│              cv_agent run --data-yaml dataset.yaml           │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-        ┌──────────────────▼──────────────────┐
-        │         TrainingEngine (main loop)   │
-        │  INIT → VALIDATE → TRAIN → EVAL →   │
-        │                DECIDE → (next round) │
-        └──┬────────┬──────────┬──────────┬───┘
-           │        │          │          │
-      ┌────▼──┐ ┌──▼─────┐ ┌──▼──────┐ ┌─▼──────────────┐
-      │ Data  │ │ YOLO   │ │ Optuna  │ │ LLM Advisor    │
-      │Valid. │ │Trainer │ │ Hparam  │ │ (DeepSeek API + │
-      │+Suppl.│ │ + Eval │ │ Search  │ │ heuristic fallb)│
-      └───────┘ └────────┘ └─────────┘ └────────────────┘
-                           │
-              ┌────────────▼────────────┐
-              │ MLflow (local fallback)  │
-              │  + runs/exp_<ts>/        │
-              │  snapshots & logs        │
-              └──────────────────────────┘
+INIT → VALIDATE_DATA → TRAIN → EVALUATE → DECIDE ─┐
+         │                    ↑                    │
+         └→ DATA_SUPPLEMENT ──┘                    │
+                              └────────────────────┘
+                                        ↓
+                                      DONE
 ```
 
-Each round: validate (once) → train N epochs → evaluate → decide
-(Green/Yellow/Red) → mutate hyperparameters → repeat until `max_rounds`.
+| Component | Responsibility |
+|-----------|----------------|
+| `TrainingEngine` | Main loop, round lifecycle, artifact I/O |
+| `DatasetValidator` | Startup data quality checks |
+| `YoloTrainer` + `Evaluator` | Ultralytics training and reward scoring |
+| `ThreeStateDecisionEngine` | Green / Yellow / Red classification and recovery actions |
+| `OptunaOptimizer` | Next-round hyperparameter proposals |
+| `LLMAdvisor` | Confusion-matrix and data-gap analysis on **3× Red escalation only** |
+| `CheckpointManager` | Top-N saves, manual saves, resume metadata |
+| `MLflowManager` | Experiment tracking |
+
+**Normal rounds do not call the LLM.** Hyperparameter changes come from the rule controller + Optuna. User feedback in Ask mode is parsed by rule-based `guidance` (e.g. “only lr”, “don't change mosaic”), not by the LLM.
+
+---
+
+## Requirements
+
+- **Python** 3.10+
+- **PyTorch** + **Ultralytics YOLO** (GPU recommended)
+- **MLflow server** — optional (local `./mlruns` fallback works out of the box)
+- **LLM API key** — optional (heuristic fallback works out of the box)
+
+The CLI checks at startup that `torch` and `ultralytics` are importable. Use a dedicated conda/venv with those packages installed (many teams use an env named `yolo`).
+
+---
+
+## Installation
+
+```bash
+git clone <your-repo-url>
+cd cv_agent
+
+# Activate your YOLO environment (example)
+conda activate yolo
+
+pip install -e .
+
+# Optional: dev tools
+pip install -e ".[dev]"
+```
+
+---
 
 ## Quick Start
 
-### 1. Prerequisites
+### Smoke test (COCO128)
 
-```bash
-# Activate the conda env that has ultralytics + torch + CUDA
-conda activate yolo
-
-# Install cv_agent (editable, into the yolo env)
-cd cv_agent
-pip install -e .
-```
-
-The CLI verifies at startup that `ultralytics` and `torch` are importable and
-exits with a clear message if the wrong environment is active.
-
-### 2. First run (COCO128 demo)
-
-The repo ships a `coco128.yaml` and the default config points at it, so you
-can verify the full pipeline in ~1 minute:
+The repo ships `coco128.yaml` and defaults in `cv_agent.yaml` point at it. No dataset path is required for a first run:
 
 ```bash
 cv_agent run
 ```
 
-This trains `yolov8n` on COCO128 for a few epochs and runs the closed loop.
-**Be patient through startup** — model loading, dataloader scanning, and the
-AMP check all happen before the first epoch prints; GPU idles during this
-phase, which is normal. Once you see `Starting training for N epochs...`,
-training is underway.
+This downloads COCO128 if needed, trains `yolo26n` for a few epochs per round, and runs the full closed loop.
 
-### 3. Real usage
+> **Note:** Startup can look idle while Ultralytics loads the model, scans the dataloader, and runs the AMP check. Once you see `Starting training for N epochs...`, training is underway.
+
+### Train on your dataset
 
 ```bash
-# Full closed-loop training on your dataset, prioritizing one class
-cv_agent run --data-yaml path/to/dataset.yaml --optimize-for vehicle
-
-# Fully autonomous (no prompts)
-cv_agent run --data-yaml dataset.yaml --interaction auto --max-rounds 10
-
-# Dry-run: validate the dataset only, no training
-cv_agent validate --data-yaml path/to/dataset.yaml
-
-# Resume a prior experiment
-cv_agent resume --run-dir runs/exp_20260122_143052
-
-# List saved Top-N and manual checkpoints
-cv_agent list-checkpoints
-
-# Non-interactive: new experiment from a saved checkpoint
-cv_agent run --start from-checkpoint --checkpoint-id exp_20260122_143052:top:1
-
-# Non-interactive: resume
-cv_agent run --start resume --run-dir runs/exp_20260122_143052
+cv_agent run --data-yaml path/to/dataset.yaml --model yolo26s --max-rounds 10
 ```
 
-At startup (interactive TTY), `cv_agent run` prompts for three modes:
+### Validate only (no training)
 
-1. **New from pretrained** — default; uses `model_variant` weights (e.g. `yolo26n.pt`)
+```bash
+cv_agent validate --data-yaml path/to/dataset.yaml
+```
+
+### Resume or fork
+
+```bash
+# Continue the same experiment directory
+cv_agent resume --run-dir runs/exp_20260122_143052
+
+# Or use the startup wizard / flags on `run`
+cv_agent run --start resume --run-dir runs/exp_20260122_143052
+cv_agent run --start from-checkpoint --checkpoint-id exp_20260122_143052:top:1
+
+# List saved checkpoints
+cv_agent list-checkpoints
+```
+
+On an interactive TTY, `cv_agent run` also prompts for:
+
+1. **New from pretrained** — default; uses `model_variant` weights
 2. **Resume experiment** — same `exp_*` directory; restores round, hyperparameters, Optuna study
-3. **New from saved checkpoint** — new `exp_*` directory; fine-tunes from a Top-N or manual save
+3. **New from checkpoint** — new `exp_*` directory; fine-tunes from a Top-N or manual save
 
-### CLI reference
+---
+
+## CLI Reference
 
 ```
 cv_agent [--config PATH] [--interaction auto|ask] [--version] <command>
 
 Commands:
-  run               Start automated closed-loop training
-  validate          Run dataset validation only (dry run)
+  run               Start closed-loop training
+  validate          Dataset validation only
   resume            Resume from a prior experiment directory
   list-checkpoints  List Top-N, manual, and resumable checkpoints
-
-run options:
-  --optimize-for TEXT       Class name to prioritize (e.g. "vehicle")
-  --max-rounds INT          Override max training rounds
-  --data-yaml PATH          Override dataset YAML path
-  --model TEXT              Override model variant (yolo26n, yolov8n, …)
-  --start fresh|resume|from-checkpoint   Startup mode (non-interactive)
-  --run-dir PATH            Run directory for --start resume
-  --checkpoint-id TEXT      Checkpoint id for --start from-checkpoint
 ```
 
-## Run Modes
+### `cv_agent run` options
 
-### Auto Mode (`--interaction auto`)
-- Executes all parameter mutations, training, and rollbacks automatically
-- Prints color-coded decision logs (🟢/🟡/🔴) via Rich
-- Never blocks — ideal for unattended / overnight training
-- On unrecoverable dataset validation errors it aborts cleanly (an unattended
-  run cannot fix missing data by re-validating in a loop)
+| Option | Description |
+|--------|-------------|
+| `--data-yaml PATH` | Dataset YAML (defaults to COCO128 bootstrap if omitted) |
+| `--model TEXT` | Model variant (`yolo26n`, `yolov8n`, `yolo11s`, …) |
+| `--max-rounds INT` | Override `max_rounds` from config |
+| `--optimize-for TEXT` | Prioritize one class in the reward function |
+| `--start fresh\|resume\|from-checkpoint` | Startup mode (non-interactive) |
+| `--run-dir PATH` | Run directory for `--start resume` |
+| `--checkpoint-id TEXT` | Checkpoint ID from `list-checkpoints` |
 
-### Ask-before-edit Mode (`--interaction ask`, default)
-- Before any hyperparameter change, renders a **change diff** via a Rich panel
-- Blocks for **Y/n** confirmation (questionary)
-- Accepts **natural-language feedback** (e.g. "Don't change Mosaic, just LR")
-- NL feedback is folded into the next round's LLM context
-- On dataset validation failure, prompts whether to retry after importing data
+Global flags:
 
-## Three-State Decision System
+| Flag | Description |
+|------|-------------|
+| `-c, --config PATH` | Config file (default: `cv_agent.yaml`) |
+| `--interaction auto\|ask` | Override interaction mode |
 
-After each round, the result is classified relative to the historical best:
+Supported model variants: `yolo26{n,s,m,l,x}`, `yolov8{n,s,m,l,x}`, `yolo11{n,s,m,l,x}`.
 
-| State | Condition | Action |
-|-------|-----------|--------|
-| 🟢 **Green** | clear improvement | Commit checkpoint, Optuna Bayesian proposal for next round |
-| 🟡 **Yellow** | within oscillation band | Random walk or simulated annealing to escape the local optimum |
-| 🔴 **Red** | clear degradation | Diagnose overfit/underfit, adjust params or rollback to best |
+---
 
-The first round is always accepted as the Green baseline.
+## Interaction Modes
 
-**Red × 3 escalation**: after 3 consecutive Red states the system
-1. Force-rolls back to the historical best checkpoint
-2. Calls the LLM (or heuristic fallback) to analyze the validation confusion matrix
-3. Generates a **Data Gap Report** (`data_gap_report.md` + `.json`)
+### Ask mode (default)
+
+- Shows a **decision panel** after each round: color, action, reason, proposed hyperparameters, rollback hint
+- Blocks for explicit choices: apply proposal, reject, skip rollback, add guidance, quit
+- **Guidance parsing** — common phrases constrain the next proposal:
+  - `only lr` / `just lr` / `只改lr` → adjust learning rate only
+  - `don't change mosaic` / `keep batch` / `不要改mosaic` → freeze fields
+- Optional **manual checkpoint save** at the DECIDE prompt
+- On dataset validation failure: choose supplement, retry validation, or abort
+
+### Auto mode
+
+- Auto-approves decisions after a configurable countdown (`auto_prompt_seconds`, default 10s)
+- Press `A` during countdown to review the current round in Ask; `Q` to quit
+- No blocking prompts — suitable for overnight runs
+- On unrecoverable dataset errors: generates supplement scripts and **exits** (cannot self-heal missing data)
+
+You can switch Ask ↔ Auto **per round** at the DECIDE checkpoint. The chosen mode persists for later rounds until changed again.
+
+---
+
+## Decision System
+
+After each round, the reward score is compared to the historical best:
+
+| State | Condition (vs. best) | Typical action |
+|-------|----------------------|----------------|
+| Green | improvement ≥ `green_threshold_pct` (default 3%) | Commit best checkpoint; Optuna Bayesian proposal for next round |
+| Yellow | between green and red thresholds | Local-optimum escape (random walk / SA / Bayesian per config) |
+| Red | drop ≤ `red_threshold_pct` (default −5%) | Diagnose overfit/underfit; rollback and/or aggressive param change |
+
+The **first round** is always accepted as the Green baseline.
+
+### Red escalation (3× consecutive Reds)
+
+When `red_escalation_count` (default 3) is hit:
+
+1. Force rollback to the historical best checkpoint
+2. LLM (or heuristic fallback) analyzes the confusion matrix
+3. Writes `data_gap_report.md` / `.json`
 4. Enters **Data Supplement Mode**
 
-## Data Validation & Supplement
+`yellow_resets_red_count: true` (default) resets the Red streak after a Yellow round.
 
-At startup the dataset is validated for:
-- Image count ≥ `min_images` per split
-- Per-class annotation count ≥ `min_ann_per_class`
-- Every image has a label file (and vice-versa)
-- Object size distribution (pixel area)
-- Optional brightness diversity
+---
 
-Paths follow Ultralytics conventions: an absolute `path:` is used as-is; a
-relative `path:` resolves against the YAML directory, then Ultralytics'
-`datasets_dir` (where auto-downloaded datasets like COCO128 land).
+## Hyperparameter Optimization
 
-**Data Supplement Mode** (triggered on validation errors):
-- Diagnoses which classes / splits are deficient
-- Generates executable download scripts under `supplement_scripts/`:
-  `roboflow_download.py`, `openimages_download.sh`,
-  `huggingface_download.py`, `annotation_tools.md`
-- **ask mode**: prompts whether to retry validation after you import data
-- **auto mode**: writes the scripts and aborts the session (an unattended run
-  cannot self-heal missing data) — run the scripts, add the data, re-run
+| Round color | Optuna strategy |
+|-------------|-----------------|
+| Green | TPE Bayesian via `study.ask()` / `study.tell()` |
+| Yellow | `yellow_strategy`: `random_walk` (default), `simulated_annealing`, or `bayesian` |
+| Red | Controller-driven recovery; pending Optuna trials are abandoned |
 
-## Single-Class Optimization (`--optimize-for`)
+Key behaviors:
 
-```bash
-cv_agent run --optimize-for vehicle
-```
+- Each run uses its own `optuna_study.db` under the experiment directory
+- `n_trials` caps how many `ask()` calls Optuna makes per session; after the budget, proposals keep current params
+- Only scores from **actually executed** proposed params are reported to Optuna; mismatches mark the trial `FAIL`
+- Search space is fully configurable in YAML (`optuna.search_space`)
 
-The reward function weights the target class's `mAP@0.5` 3×:
+Legacy `search_strategy: random_walk|simulated_annealing` still maps to the Yellow escape strategy when non-Bayesian.
+
+---
+
+## Checkpoints & Resume
+
+Each experiment lives under `runs/exp_<timestamp>/`:
 
 ```
-reward = 0.3 × global_mAP50 + 1.7 × target_class_mAP50
+runs/exp_20260122_143052/
+├── weights/
+│   ├── best.pt                 # active weights (updated during training)
+│   └── last.pt
+├── best_snapshots/             # immutable per-round copies for rollback
+│   └── round_001_best.pt
+├── checkpoints/
+│   ├── leaderboard.json        # Top-N ranking
+│   ├── top/
+│   │   └── rank01_score0.6579_round1.pt
+│   └── manual/
+│       └── my_save/
+│           ├── weights.pt
+│           └── manifest.json
+├── optuna_study.db             # per-run Optuna study
+├── session_state.json          # resume metadata
+├── metrics.json
+├── decision_log.json
+├── args.yaml                   # Ultralytics training args
+├── results.csv
+├── data_gap_report.md          # after 3× Red escalation
+├── supplement_scripts/         # on validation / data-gap failure
+└── cv_agent.log
 ```
 
-Without `--optimize-for`, `reward = global_mAP50`.
-
-## Checkpoints and Top-N saves
-
-Each experiment directory can store:
-
-```
-runs/exp_*/
-  weights/best.pt              # active weights (mutable during training)
-  best_snapshots/              # immutable per-round copies for RED rollback
-  checkpoints/
-    leaderboard.json           # Top-N score ranking
-    top/rank01_score0.4500_round3.pt
-    manual/my_save/weights.pt  # user-named saves (Ask mode)
-    manual/my_save/manifest.json
-  session_state.json           # resume same experiment
-```
-
-- **Top-N** (`checkpoints.top_n`, default 5): after each round, if the score
-  qualifies, weights are copied into `checkpoints/top/` and the leaderboard is updated.
-- **Manual save** (Ask mode): at DECIDE, choose *Save current model and hyperparameters*
-  and enter a name.
-- **`best_snapshots/`** vs **`checkpoints/top/`**: snapshots support rollback history;
-  Top-N is a score-ranked library for picking models to fork.
+| Mechanism | Purpose |
+|-----------|---------|
+| `best_snapshots/` | Rollback history after Red decisions |
+| `checkpoints/top/` | Score-ranked library for forking new experiments |
+| `checkpoints/manual/` | User-named saves from Ask mode |
+| `session_state.json` | Resume the same `exp_*` directory |
 
 Configure in `cv_agent.yaml`:
 
@@ -247,139 +306,221 @@ checkpoints:
   manual_save_dir: manual
 ```
 
+Training stops when `round_num >= max_rounds`. It does **not** run indefinitely — raise `max_rounds` or resume with an updated config for more rounds.
+
+---
+
+## Dataset Validation & Supplement
+
+At startup, `DatasetValidator` checks:
+
+- Minimum images per split (`min_images`)
+- Minimum annotations per class (`min_ann_per_class`)
+- Image ↔ label pairing (missing labels, orphan labels)
+- Object pixel-area distribution (`min_pixel_area`)
+- Optional brightness and angle diversity
+
+Dataset paths follow Ultralytics conventions: absolute `path:` is used as-is; relative `path:` resolves against the YAML directory, then Ultralytics' `datasets_dir`.
+
+| Severity | Behavior |
+|----------|----------|
+| **error** | Enter Data Supplement Mode |
+| **warning** | Log and continue training |
+
+### Data Supplement Mode
+
+Triggered by validation **errors** or **3× Red escalation**. Generates helper scripts under `supplement_scripts/`:
+
+- `roboflow_download.py`
+- `openimages_download.sh`
+- `huggingface_download.py`
+- `annotation_tools.md` (when annotations are missing)
+
+| Mode | Behavior |
+|------|----------|
+| **ask** | Prompt to retry validation after you import/fix data |
+| **auto** | Write scripts and end the session |
+
+`cv_agent` does not auto-download data; run the scripts manually, fix your dataset, then re-run or retry validation.
+
+---
+
+## Single-Class Optimization
+
+Prioritize one class in the reward function:
+
+```bash
+cv_agent run --data-yaml dataset.yaml --optimize-for vehicle
+```
+
+Reward formula when `--optimize-for` is set:
+
+```
+reward = 0.3 × global_mAP50 + 1.7 × target_class_mAP50
+```
+
+Without `--optimize-for`, `reward = global_mAP50`.
+
+Per-class mAP keys appear in metrics after validation enrichment (`mAP50_class_<id>`).
+
+---
+
 ## Configuration
 
-Settings live in `cv_agent.yaml` (tracked template). Any field can be
-overridden by CLI flags. Key fields:
+Settings live in `cv_agent.yaml` (tracked template). Create `cv_agent.local.yaml` (git-ignored) for secrets and personal overrides — it is deep-merged on top. CLI flags override YAML fields.
 
 ```yaml
-model_variant: yolov8n
-epochs_per_round: 100       # epochs per round
-max_rounds: 10              # total closed-loop rounds
-interaction_mode: ask       # auto | ask
-optimize_for_class: null    # or e.g. "vehicle"
+model_variant: yolo26n
+epochs_per_round: 3          # raise for real training (e.g. 50–100)
+max_rounds: 7
+interaction_mode: ask        # auto | ask
+auto_prompt_seconds: 10
+
+optimize_for_class: null     # or e.g. "person"
 
 data:
   data_yaml: coco128.yaml
-  min_images: 100
-  min_ann_per_class: 50
+  min_images: 50
+  min_ann_per_class: 1
   min_pixel_area: 64
   validate_brightness: true
+  validate_angles: true
 
 initial_hyperparams:
   lr0: 0.01
   batch: 16
   mosaic: 1.0
-  mixup: 0.0
-  # ... full augmentation set: hsv_*, degrees, scale, shear, flipud, fliplr, ...
+  # ... full augmentation and loss weights
+
+decision:
+  green_threshold_pct: 3.0
+  red_threshold_pct: -5.0
+  red_escalation_count: 3
+  yellow_resets_red_count: true
 
 optuna:
   n_trials: 50
-  search_strategy: bayesian   # bayesian | random_walk | simulated_annealing
+  yellow_strategy: random_walk   # random_walk | simulated_annealing | bayesian
   n_startup_trials: 10
-  pruner: median              # median | hyperband | none
+  pruner: median                 # median | hyperband | none
   search_space:
     lr0: [0.001, 0.1]
     batch: [4, 8, 16, 32]
     mosaic: [0.0, 1.0]
-    mixup: [0.0, 0.5]
-    # ... tune or widen any range without code changes
+    # ... widen or narrow any range without code changes
+
+checkpoints:
+  top_n: 5
+  auto_save_top: true
 
 llm:
   api_base: https://api.deepseek.com
-  api_key: ""                 # leave empty; use env var or local file (see Secrets)
+  api_key: ""                  # use env var or cv_agent.local.yaml
   model: deepseek-v4-flash
-  max_tokens: 4096
-  temperature: 0.3
   max_calls_per_session: 20
 
-mlflow_uri: http://localhost:5000   # falls back to local file store if unreachable
+mlflow_uri: http://localhost:5000
 experiment_name: cv_agent
 output_root: runs
 ```
 
-> The optimizer is left on Ultralytics' `auto` so `lr0` is scaled appropriately
-> for the chosen optimizer (e.g. AdamW wants ~1e-3, not a SGD-style 0.01).
+> Ultralytics optimizer stays on `auto` so `lr0` scales appropriately for the chosen optimizer (e.g. AdamW vs SGD).
 
-## Secrets & API Keys
+---
 
-**Never commit a real API key.** Three safe ways to supply the LLM key, in
-priority order:
+## LLM Integration
 
-1. **Environment variable** (recommended):
+Default backend: **DeepSeek** (OpenAI-compatible API). Any OpenAI-compatible endpoint works — change `api_base` and `model` in config.
+
+The LLM is used **only** after 3 consecutive Red rounds:
+
+1. Confusion-matrix analysis
+2. Structured data-gap report generation
+
+It is **not** on the hot path for normal Green/Yellow/Red hyperparameter decisions. LLM-suggested loss weights are reported but **not** automatically applied to YOLO training.
+
+Without an API key, or when the call limit / network fails, `cv_agent` falls back to heuristic statistical analysis and the closed loop continues.
+
+---
+
+## MLflow Tracking
+
+If `mlflow_uri` points to a running server, metrics, parameters, and artifacts are logged remotely.
+
+If the server is unreachable, `cv_agent` transparently falls back to a local file store (`./mlruns`) so training never blocks on a dead endpoint.
+
+```bash
+mlflow ui    # browse at http://localhost:5000
+```
+
+`mlruns/` is git-ignored.
+
+---
+
+## Project Layout
+
+```
+cv_agent/
+├── cv_agent.yaml           # default config (tracked)
+├── coco128.yaml            # demo dataset spec
+├── pyproject.toml
+├── src/cv_agent/
+│   ├── cli/                # Click CLI entry point
+│   ├── core/               # engine, config, state machine
+│   ├── data/               # validation, supplement, bootstrap
+│   ├── decision/           # three-state, Optuna, LLM, guidance
+│   ├── interaction/        # ask/auto handlers, mode control
+│   ├── tracking/           # checkpoints, MLflow, run dirs
+│   ├── trainer/            # YOLO trainer, evaluator
+│   └── ui/                 # Rich console, live panel, prompts
+└── tests/
+```
+
+---
+
+## Development
+
+```bash
+# Run tests (Windows: use a dedicated basetemp)
+pytest tests/ --basetemp=.tmp_pytest -p no:cacheprovider
+
+# Lint
+ruff check src tests
+```
+
+Activate the pre-commit secret scanner (recommended):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+---
+
+## Security
+
+**Never commit real API keys.**
+
+Provide the LLM key via (priority order):
+
+1. Environment variable:
    ```bash
-   export CV_AGENT_LLM_KEY="sk-..."     # or DEEPSEEK_API_KEY
+   export CV_AGENT_LLM_KEY="sk-..."
+   # or
+   export DEEPSEEK_API_KEY="sk-..."
    ```
 
-2. **Local override file** `cv_agent.local.yaml` (git-ignored, deep-merged on
-   top of `cv_agent.yaml`):
+2. Git-ignored local config `cv_agent.local.yaml`:
    ```yaml
    llm:
      api_key: "sk-your-real-key"
    ```
 
-3. Leave `api_key` empty in `cv_agent.yaml` → heuristic fallback (no LLM).
+3. Leave `api_key` empty → heuristic-only mode (no LLM calls).
 
-A **pre-commit hook** (`.githooks/pre-commit`) scans staged content for common
-secret patterns (`sk-...`, GitHub tokens, private keys, …) and aborts the
-commit on a match. Activate it once:
-```bash
-git config core.hooksPath .githooks
-```
+The `.githooks/pre-commit` hook scans staged files for common secret patterns (`sk-...`, tokens, private keys) and blocks the commit on a match.
 
-## Experiment Directory
+---
 
-Each session creates `runs/exp_<timestamp>/`:
+## License
 
-```
-runs/exp_20260122_143052/
-├── weights/
-│   ├── best.pt
-│   └── last.pt
-├── args.yaml                 # Ultralytics training args
-├── results.csv               # per-epoch metrics (Ultralytics)
-├── metrics.json              # cv_agent round metrics
-├── decision_log.json         # per-round Green/Yellow/Red decisions
-├── data_gap_report.md        # on Red×3 escalation
-├── data_gap_report.json
-├── supplement_scripts/       # on validation failure
-│   ├── roboflow_download.py
-│   ├── openimages_download.sh
-│   ├── huggingface_download.py
-│   └── annotation_tools.md
-└── cv_agent.log
-```
-
-## LLM Backend
-
-Default: **DeepSeek API** (`api.deepseek.com`), OpenAI-compatible. Works with
-any OpenAI-compatible endpoint — change `api_base` / `model` in the config.
-
-The LLM is only used for two structured tasks: confusion-matrix analysis and
-data-gap-report generation (both after Red×3 escalation). It is **not** on the
-hot path of normal rounds.
-
-**Heuristic fallback**: with no API key, or if the API is unreachable / the
-call limit is hit, cv_agent falls back to rule-based statistical analysis
-(recall thresholds, off-diagonal confusion rates, average-recall-driven loss
-weights). The closed loop keeps running with zero LLM calls.
-
-## MLflow Tracking
-
-If `mlflow_uri` points at a running MLflow server, metrics/params/artifacts
-are logged there. **If the server is unreachable, cv_agent transparently
-falls back to a local file store (`./mlruns`)** so Ultralytics' built-in
-MLflow callback never stalls `model.train()` on a dead network endpoint.
-Either way you can browse results with:
-```bash
-mlflow ui        # → http://localhost:5000
-```
-
-(`mlruns/` is git-ignored.)
-
-## Requirements
-
-- Python 3.10+
-- A conda environment with Ultralytics YOLO, PyTorch, CUDA (the `yolo` env)
-- MLflow server — **optional** (local file-store fallback works out of the box)
-- LLM API key — **optional** (heuristic fallback works out of the box)
+MIT — see `pyproject.toml`.

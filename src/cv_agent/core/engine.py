@@ -23,6 +23,7 @@ from cv_agent.core.state_machine import (
 from cv_agent.data.gap_report import DataGapReport
 from cv_agent.data.supplement import DataSupplementer
 from cv_agent.data.validator import DatasetValidator, ValidationIssue
+from cv_agent.decision.guidance import apply_guidance_constraints, parse_guidance
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
@@ -423,6 +424,10 @@ class TrainingEngine:
         self._last_round_result = round_result
         self._last_comparison = comparison
         self._history.append(round_result)
+
+        if self._optuna is not None and self._current_params is not None:
+            self._optuna.report_result(round_result.score, self._current_params)
+
         self._maybe_record_top_checkpoint(round_result)
         self._state = TrainingLoopState.DECIDE
 
@@ -446,6 +451,14 @@ class TrainingEngine:
         )
 
         checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
+
+        color = decision.color
+        proposed_params, proposal_from_optuna = self._preview_proposed_params(
+            decision=decision,
+            color=color,
+            round_score=round_result.score,
+        )
+        decision.proposed_hyperparams = proposed_params
 
         # Pick Ask/Auto for **this round's** decision review (before review runs).
         try:
@@ -484,8 +497,36 @@ class TrainingEngine:
                 f"\n[Round {self._round_num} user feedback]: {review.feedback}"
             )
 
+        apply_ai = review.apply_recommendation
+
+        if not apply_ai:
+            if proposal_from_optuna:
+                self._optuna.abandon_pending()
+            proposed_params = self._current_params
+        elif decision.action not in (
+            DecisionAction.ACCEPT.value,
+            DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
+        ):
+            if proposal_from_optuna:
+                self._optuna.abandon_pending()
+            proposed_params = decision.next_hyperparams
+        # else: keep preview proposed_params from Optuna / escape strategy
+
+        guidance_text = review.feedback or ""
+        constraints = parse_guidance(guidance_text)
+        if constraints.raw_text:
+            proposed_params = apply_guidance_constraints(
+                self._current_params,
+                proposed_params,
+                constraints,
+            )
+            if proposal_from_optuna and (
+                proposed_params.model_dump() != decision.proposed_hyperparams.model_dump()
+            ):
+                self._optuna.abandon_pending()
+            decision.metadata["guidance_constraints"] = constraints.to_metadata()
+
         # --- Three-state routing ---
-        color = decision.color
 
         if color == DecisionColor.GREEN.value:
             self._handle_green(decision, round_result)
@@ -498,23 +539,6 @@ class TrainingEngine:
         # --- Record decision ---
         self._decision_log.append(decision.to_dict())
         self._mlflow.log_decision(decision.to_dict(), self._round_num)
-
-        # --- Propose next hyperparameters ---
-        apply_ai = review.apply_recommendation
-        if apply_ai:
-            if decision.action in (
-                DecisionAction.ACCEPT.value,
-                DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
-            ):
-                proposed_params = self._optuna.propose(
-                    current_params=self._current_params,
-                    current_score=round_result.score,
-                    state=color,
-                )
-            else:
-                proposed_params = decision.next_hyperparams
-        else:
-            proposed_params = self._current_params
 
         # Ask-mode: confirm before applying the actual next-round params
         if isinstance(self._interaction, AskModeHandler):
@@ -533,10 +557,26 @@ class TrainingEngine:
                     return
                 if cfg_review.feedback:
                     self._llm_context_accumulator += f"\n[Config feedback]: {cfg_review.feedback}"
+                    cfg_constraints = parse_guidance(cfg_review.feedback)
+                    if cfg_constraints.raw_text:
+                        proposed_params = apply_guidance_constraints(
+                            self._current_params,
+                            proposed_params,
+                            cfg_constraints,
+                        )
+                        if proposal_from_optuna:
+                            self._optuna.abandon_pending()
+                        decision.metadata["config_feedback_constraints"] = (
+                            cfg_constraints.to_metadata()
+                        )
                 if cfg_review.approved:
                     self._current_params = proposed_params
                 else:
-                    self._current_params = self._decision_engine._perturb_params(self._current_params)
+                    if proposal_from_optuna:
+                        self._optuna.abandon_pending()
+                    self._current_params = self._decision_engine._perturb_params(
+                        self._current_params
+                    )
             else:
                 self._current_params = proposed_params
         elif apply_ai:
@@ -558,6 +598,26 @@ class TrainingEngine:
     # Decision handlers
     # ------------------------------------------------------------------
 
+    def _preview_proposed_params(
+        self,
+        decision: Decision,
+        color: str,
+        round_score: float,
+    ) -> tuple[HyperParams, bool]:
+        """Build next-round params for review display (may create pending Optuna trial)."""
+        if decision.action in (
+            DecisionAction.ACCEPT.value,
+            DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
+        ):
+            params, from_optuna = self._optuna.propose_next(
+                self._current_params,
+                color,
+                current_score=round_score,
+            )
+            return params, from_optuna
+        self._optuna.abandon_pending()
+        return decision.next_hyperparams, False
+
     def _handle_green(self, decision: Decision, round_result: RoundResult) -> None:
         """Green: commit checkpoint, update best, reset red counter."""
         log_success(f"GREEN — {decision.reason}")
@@ -575,8 +635,8 @@ class TrainingEngine:
     def _handle_yellow(self, decision: Decision) -> None:
         """Yellow: oscillation — trigger local optimum escape."""
         log_warning(f"YELLOW — {decision.reason}")
-        # Optuna will handle the escape strategy in propose()
-        self._red_tracker.reset()
+        if self._config.decision.yellow_resets_red_count:
+            self._red_tracker.reset()
 
     def _handle_red(self, decision: Decision, do_rollback: bool = True) -> None:
         """Red: degradation — diagnose and act. If 3 consecutive Reds, escalate."""
@@ -833,7 +893,10 @@ class TrainingEngine:
         self._evaluator = Evaluator(optimize_for_class_id=optimize_id)
 
         # Decision engine
-        self._decision_engine = ThreeStateDecisionEngine()
+        self._decision_engine = ThreeStateDecisionEngine(config.decision)
+        self._red_tracker = RedCountTracker(
+            max_consecutive=config.decision.red_escalation_count,
+        )
 
         # Optuna optimizer — per-run study DB to avoid cross-experiment pollution
         self._optuna = OptunaOptimizer(

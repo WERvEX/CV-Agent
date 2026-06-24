@@ -1,11 +1,8 @@
 """Optuna-driven hyperparameter optimization.
 
-Three search strategies:
-1. Bayesian (default): TPESampler with multivariate=True
-2. Random Walk (Yellow state): Gaussian perturbation with decaying step
-3. Simulated Annealing (Yellow state): Accept worse params with exp(-delta/T)
-
-Study state is persisted to optuna_study.db for resume support.
+GREEN: TPESampler (Bayesian) via study.ask/tell.
+YELLOW: random_walk | simulated_annealing | bayesian (configurable).
+RED: handled by ThreeStateDecisionEngine — pending Optuna trials are abandoned.
 """
 
 from __future__ import annotations
@@ -24,34 +21,22 @@ class OptunaOptimizer:
     """Hyperparameter optimizer using Optuna as the backend."""
 
     def __init__(self, config: OptunaConfig, study_db: Path | None = None) -> None:
-        """Initialize the optimizer.
-
-        Args:
-            config: OptunaConfig with strategy, trial count, search space.
-            study_db: Path to SQLite file for study persistence.
-        """
         self.config = config
         self.search_space = config.search_space
         self.study_db = str(study_db) if study_db else "optuna_study.db"
         self._study = None
-        self._last_trial = None
+        self._pending_trial = None
+        self._pending_params: HyperParams | None = None
         self._trial_count = 0
 
-        # Simulated annealing state
         self._sa_temperature: float = 1.0
         self._sa_decay: float = 0.9
         self._sa_best_params: HyperParams | None = None
         self._sa_best_score: float = 0.0
 
-        # Random walk state
         self._rw_step_scale: float = 0.1
 
-    # ------------------------------------------------------------------
-    # Study initialization
-    # ------------------------------------------------------------------
-
     def _init_study(self) -> None:
-        """Lazy-initialize the Optuna study."""
         if self._study is not None:
             return
 
@@ -80,82 +65,115 @@ class OptunaOptimizer:
 
         logger.info(f"Optuna study initialized ({len(self._study.trials)} prior trials loaded)")
 
-    # ------------------------------------------------------------------
-    # Hyperparameter proposal
-    # ------------------------------------------------------------------
+    def report_result(self, score: float, actual_params: HyperParams) -> None:
+        """Report the completed round for the pending Optuna trial, if params match."""
+        if self._pending_trial is None or self._pending_params is None:
+            return
+        if self._study is None:
+            return
+
+        import optuna
+
+        trial_num = self._pending_trial.number
+        if self._pending_params.model_dump() == actual_params.model_dump():
+            try:
+                self._study.tell(trial_num, score)
+                logger.info(f"Reported score {score:.4f} to Optuna trial #{trial_num}")
+            except Exception as e:
+                logger.warning(f"Failed to report to Optuna: {e}")
+        else:
+            try:
+                self._study.tell(trial_num, state=optuna.trial.TrialState.FAIL)
+                logger.info(
+                    f"Marked Optuna trial #{trial_num} as FAIL — "
+                    "actual params differed from proposal."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fail Optuna trial: {e}")
+
+        self._pending_trial = None
+        self._pending_params = None
+
+    def abandon_pending(self) -> None:
+        """Mark the pending trial as failed when it will not be evaluated."""
+        if self._pending_trial is None or self._study is None:
+            self._pending_trial = None
+            self._pending_params = None
+            return
+
+        import optuna
+
+        trial_num = self._pending_trial.number
+        try:
+            self._study.tell(trial_num, state=optuna.trial.TrialState.FAIL)
+            logger.info(f"Abandoned pending Optuna trial #{trial_num}")
+        except Exception as e:
+            logger.warning(f"Failed to abandon Optuna trial: {e}")
+
+        self._pending_trial = None
+        self._pending_params = None
+
+    def propose_next(
+        self,
+        current_params: HyperParams,
+        state: str,
+        current_score: float | None = None,
+    ) -> tuple[HyperParams, bool]:
+        """Propose hyperparameters for the next round.
+
+        Returns:
+            (params, from_optuna) — ``from_optuna`` is True when params came from study.ask().
+        """
+        if state == "green":
+            return self._propose_bayesian(current_params)
+
+        if state == "yellow":
+            yellow = self.config.effective_yellow_strategy()
+            if yellow == "simulated_annealing":
+                return self._propose_simulated_annealing(current_params, current_score), False
+            if yellow == "bayesian":
+                return self._propose_bayesian(current_params)
+            return self._propose_random_walk(current_params), False
+
+        return current_params, False
 
     def propose(
         self,
         current_params: HyperParams,
         current_score: float | None,
-        state: str,  # "green" | "yellow" | "red"
+        state: str,
     ) -> HyperParams:
-        """Propose the next set of hyperparameters based on state.
+        """Legacy combined API — prefer report_result + propose_next."""
+        if current_score is not None:
+            self.report_result(current_score, current_params)
+        params, _ = self.propose_next(current_params, state)
+        return params
 
-        Args:
-            current_params: The HyperParams used in the current round.
-            current_score: The reward score achieved this round.
-            state: Decision color — "green" → Bayesian, "yellow" → RW/SA, "red" → perturbation.
+    def _trial_budget_exhausted(self) -> bool:
+        return self._trial_count >= self.config.n_trials
 
-        Returns:
-            Proposed HyperParams for the next round.
-        """
-        # Report current trial result to Optuna if a study is initialized
-        if self._study is not None and current_score is not None and self._trial_count > 0:
-            self._report_result(current_params, current_score)
+    def _propose_bayesian(self, current_params: HyperParams) -> tuple[HyperParams, bool]:
+        if self._trial_budget_exhausted():
+            logger.info("Optuna trial budget exhausted; keeping current params.")
+            return current_params, False
 
-        if state == "green":
-            return self._propose_bayesian()
-        elif state == "yellow":
-            if self.config.search_strategy == "simulated_annealing":
-                return self._propose_simulated_annealing(current_params, current_score)
-            else:
-                return self._propose_random_walk(current_params)
-        else:  # red
-            # For Red, the three_state engine already adjusted params — return as-is
-            return current_params
-
-    # ------------------------------------------------------------------
-    # Bayesian search (via Optuna TPESampler)
-    # ------------------------------------------------------------------
-
-    def _propose_bayesian(self) -> HyperParams:
-        """Use Optuna TPESampler to suggest the next trial."""
         self._init_study()
-
         trial = self._study.ask()
-        self._last_trial = trial
-
+        self._pending_trial = trial
         params_dict = self._trial_to_params(trial)
+        params = HyperParams(**params_dict)
+        self._pending_params = params
         self._trial_count += 1
 
         logger.info(
             f"Optuna Bayesian trial #{self._trial_count}: "
-            f"lr0={params_dict['lr0']:.5f}, batch={params_dict['batch']}, "
-            f"mosaic={params_dict['mosaic']:.3f}, mixup={params_dict['mixup']:.3f}"
+            f"lr0={params.lr0:.5f}, batch={params.batch}, mosaic={params.mosaic:.3f}"
         )
-        return HyperParams(**params_dict)
-
-    def _report_result(self, params: HyperParams, score: float) -> None:
-        """Report a completed trial result back to Optuna."""
-        if self._last_trial is None:
-            logger.warning("No pending Optuna trial to report.")
-            return
-
-        trial_num = self._last_trial.number
-
-        try:
-            self._study.tell(trial_num, score)
-            self._last_trial = None
-            logger.info(f"Reported score {score:.4f} to Optuna trial #{trial_num}")
-        except Exception as e:
-            logger.warning(f"Failed to report to Optuna: {e}")
+        return params, True
 
     def _trial_to_params(self, trial) -> dict:
-        """Convert an Optuna trial to a HyperParams dict using configured search space."""
         ss = self.search_space
 
-        # Helper: suggest from a (low, high) tuple
         def suggest_float_range(name: str, bounds: tuple[float, float]) -> float:
             return trial.suggest_float(name, bounds[0], bounds[1])
 
@@ -183,36 +201,40 @@ class OptunaOptimizer:
             "fliplr": suggest_float_range("fliplr", ss.fliplr),
         }
 
-    # ------------------------------------------------------------------
-    # Random Walk (Yellow escape)
-    # ------------------------------------------------------------------
+    def _neighbor_batch(self, current_batch: int) -> int:
+        choices = sorted(self.search_space.batch)
+        if not choices:
+            return current_batch
+        if current_batch not in choices:
+            return random.choice(choices)
+        idx = choices.index(current_batch)
+        neighbors = [current_batch]
+        if idx > 0:
+            neighbors.append(choices[idx - 1])
+        if idx < len(choices) - 1:
+            neighbors.append(choices[idx + 1])
+        return random.choice(neighbors)
 
     def _propose_random_walk(self, current_params: HyperParams) -> HyperParams:
-        """Add Gaussian noise to current params with decaying step size."""
-        self._rw_step_scale *= 0.95  # decay step size
-
+        self._rw_step_scale *= 0.95
         ss = self.search_space
         current = current_params.model_dump()
+        perturbed: dict = {}
 
-        perturbed = {}
         for key, value in current.items():
             if key == "batch":
-                # Batch is categorical — randomly pick from configured choices
-                perturbed[key] = random.choice(ss.batch)
+                perturbed[key] = self._neighbor_batch(int(value))
                 continue
 
-            # Get the bounds for this parameter
             bounds = getattr(ss, key, None)
             if bounds is None or not isinstance(bounds, tuple) or len(bounds) != 2:
                 perturbed[key] = value
                 continue
 
             low, high = bounds
-            # Add Gaussian noise scaled by step size
             noise_std = (high - low) * self._rw_step_scale
             new_val = value + random.gauss(0, noise_std)
-            new_val = max(low, min(high, new_val))
-            perturbed[key] = new_val
+            perturbed[key] = max(low, min(high, new_val))
 
         logger.info(
             f"Random walk proposal (step_scale={self._rw_step_scale:.4f}): "
@@ -220,42 +242,32 @@ class OptunaOptimizer:
         )
         return HyperParams(**perturbed)
 
-    # ------------------------------------------------------------------
-    # Simulated Annealing (Yellow escape)
-    # ------------------------------------------------------------------
-
     def _propose_simulated_annealing(
         self,
         current_params: HyperParams,
-        current_score: float | None,
+        current_score: float | None = None,
     ) -> HyperParams:
-        """Simulated annealing: propose a neighbor and accept if better OR with probability exp(-delta/T)."""
-        # Initialize SA state on first call
         if self._sa_best_params is None:
             self._sa_best_params = current_params
             self._sa_best_score = current_score or 0.0
             self._sa_temperature = 1.0
 
-        # Generate a neighbor (random perturbation)
         neighbor = self._random_neighbor(current_params)
-
-        # Decide acceptance
         score = current_score or 0.0
         delta = score - self._sa_best_score
 
-        accepted = False
         if delta > 0:
-            # Better — always accept
             self._sa_best_params = current_params
             self._sa_best_score = score
+            result = current_params
             accepted = True
         else:
             prob = math.exp(delta / max(self._sa_temperature, 1e-8))
-            if random.random() < prob:
-                accepted = True
+            accepted = random.random() < prob
+            result = neighbor if accepted else current_params
+            if accepted:
                 logger.info(f"SA accepted worse proposal with probability {prob:.3f}")
 
-        # Cool down
         self._sa_temperature *= self._sa_decay
         self._sa_temperature = max(self._sa_temperature, 0.01)
 
@@ -263,18 +275,16 @@ class OptunaOptimizer:
             f"Simulated annealing: T={self._sa_temperature:.4f}, "
             f"best_score={self._sa_best_score:.4f}, accepted={accepted}"
         )
-
-        return neighbor if accepted else current_params
+        return result
 
     def _random_neighbor(self, params: HyperParams) -> HyperParams:
-        """Generate a random parameter neighbor for SA."""
         ss = self.search_space
         current = params.model_dump()
+        neighbor: dict = {}
 
-        neighbor = {}
         for key, value in current.items():
             if key == "batch":
-                neighbor[key] = random.choice(ss.batch)
+                neighbor[key] = self._neighbor_batch(int(value))
                 continue
 
             bounds = getattr(ss, key, None)
@@ -283,9 +293,12 @@ class OptunaOptimizer:
                 continue
 
             low, high = bounds
-            # Uniform perturbation within 20% of the range
             range_size = (high - low) * 0.2
             new_val = value + random.uniform(-range_size, range_size)
             neighbor[key] = max(low, min(high, new_val))
 
         return HyperParams(**neighbor)
+
+    def _report_result(self, params: HyperParams, score: float) -> None:
+        """Backward-compatible alias."""
+        self.report_result(score, params)

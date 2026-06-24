@@ -162,7 +162,7 @@ def print_decision_recommendation(
     current_params: dict[str, Any] | None = None,
     checkpoint_path: str | None = None,
 ) -> None:
-    """Print a concise, human-readable AI / heuristic recommendation."""
+    """Print a concise, human-readable controller / Optuna recommendation."""
     color = decision.get("color", "white")
     color_style = {"green": "green", "yellow": "yellow", "red": "red"}.get(color, "white")
     action = decision.get("action", "?")
@@ -170,7 +170,7 @@ def print_decision_recommendation(
     should_rollback = decision.get("should_rollback", False)
 
     table = Table(
-        title=f"Round {round_num} — [bold {color_style}]Recommendation ({color.upper()})[/bold {color_style}]",
+        title=f"Round {round_num} — [bold {color_style}]Decision ({color.upper()})[/bold {color_style}]",
         title_style=f"bold {color_style}",
         show_header=False,
         padding=(0, 1),
@@ -187,7 +187,7 @@ def print_decision_recommendation(
     else:
         table.add_row("Rollback", "[dim]No[/dim]")
 
-    next_params = decision.get("next_hyperparams") or {}
+    next_params = decision.get("proposed_hyperparams") or decision.get("next_hyperparams") or {}
     if current_params and isinstance(next_params, dict):
         changes = []
         for key, new_val in next_params.items():
@@ -197,7 +197,7 @@ def print_decision_recommendation(
         if changes:
             table.add_row("Param changes", "\n".join(changes))
         else:
-            table.add_row("Param changes", "[dim]None (Optuna may propose next round)[/dim]")
+            table.add_row("Param changes", "[dim]None (next round keeps current params)[/dim]")
     elif next_params:
         table.add_row("Param changes", json.dumps(next_params, indent=2))
 

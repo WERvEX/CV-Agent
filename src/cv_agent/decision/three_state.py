@@ -9,47 +9,44 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from cv_agent.core.config import HyperParams
+from cv_agent.core.config import DecisionConfig, HyperParams
 from cv_agent.core.state_machine import DecisionAction, DecisionColor
 from cv_agent.trainer.evaluator import EvaluationComparison
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Thresholds
-# ---------------------------------------------------------------------------
-
-GREEN_THRESHOLD = 3.0    # +3% relative improvement = Green
-RED_THRESHOLD = -5.0      # -5% relative degradation = Red
-RED_ESCALATION_COUNT = 3   # 3 consecutive Reds = force data gap research
-
-
-# ---------------------------------------------------------------------------
-# Decision data model
-# ---------------------------------------------------------------------------
+# Module-level defaults (used when no DecisionConfig is provided)
+GREEN_THRESHOLD = 3.0
+RED_THRESHOLD = -5.0
+RED_ESCALATION_COUNT = 3
 
 
 @dataclass
 class Decision:
     """Output of the three-state classifier for one training round."""
 
-    color: str                                    # "green" | "yellow" | "red"
-    action: str                                   # one of DecisionAction values
-    reason: str                                   # human-readable explanation
+    color: str
+    action: str
+    reason: str
     next_hyperparams: HyperParams = field(default_factory=HyperParams)
+    proposed_hyperparams: HyperParams | None = None
     should_rollback: bool = False
-    rollback_checkpoint: str | None = None        # path to best.pt to restore
+    rollback_checkpoint: str | None = None
     data_gap_report_needed: bool = False
-    llm_context: str | None = None                # user NL input from ask mode
+    llm_context: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        display_params = self.proposed_hyperparams or self.next_hyperparams
         return {
             "color": self.color,
             "action": self.action,
             "reason": self.reason,
-            "next_hyperparams": self.next_hyperparams.model_dump(),
+            "next_hyperparams": display_params.model_dump(),
+            "proposed_hyperparams": (
+                self.proposed_hyperparams.model_dump() if self.proposed_hyperparams else None
+            ),
             "should_rollback": self.should_rollback,
             "rollback_checkpoint": self.rollback_checkpoint,
             "data_gap_report_needed": self.data_gap_report_needed,
@@ -58,13 +55,14 @@ class Decision:
         }
 
 
-# ---------------------------------------------------------------------------
-# Decision engine
-# ---------------------------------------------------------------------------
-
-
 class ThreeStateDecisionEngine:
     """Classifies each training round and determines next actions."""
+
+    def __init__(self, config: DecisionConfig | None = None) -> None:
+        cfg = config or DecisionConfig()
+        self.green_threshold = cfg.green_threshold_pct
+        self.red_threshold = cfg.red_threshold_pct
+        self.red_escalation_count = cfg.red_escalation_count
 
     def decide(
         self,
@@ -72,17 +70,7 @@ class ThreeStateDecisionEngine:
         red_count: int,
         current_params: HyperParams,
     ) -> Decision:
-        """Classify the round and produce a Decision.
-
-        Args:
-            comparison: EvaluationComparison from the evaluator.
-            red_count: Current consecutive Red count.
-            current_params: The HyperParams used for this round.
-
-        Returns:
-            Decision with color, action, reason, and next hyperparameters.
-        """
-        # First round: always Green (no baseline to compare)
+        """Classify the round and produce a Decision."""
         if comparison.best_historical is None:
             return Decision(
                 color=DecisionColor.GREEN.value,
@@ -94,20 +82,17 @@ class ThreeStateDecisionEngine:
 
         delta = comparison.delta_percent
 
-        # ---- GREEN: significant improvement ----
-        if delta >= GREEN_THRESHOLD:
+        if delta >= self.green_threshold:
             return Decision(
                 color=DecisionColor.GREEN.value,
                 action=DecisionAction.ACCEPT.value,
                 reason=f"mAP improved by {delta:+.2f}% — committing checkpoint.",
-                next_hyperparams=current_params,  # Optuna will mutate
+                next_hyperparams=current_params,
                 should_rollback=False,
                 metadata={"delta_percent": delta},
             )
 
-        # ---- RED: significant degradation ----
-        if delta <= RED_THRESHOLD:
-            # Diagnose overfitting vs underfitting
+        if delta <= self.red_threshold:
             if comparison.overfitting:
                 return Decision(
                     color=DecisionColor.RED.value,
@@ -120,7 +105,7 @@ class ThreeStateDecisionEngine:
                     should_rollback=True,
                     metadata={"delta_percent": delta, "diagnosis": "overfitting"},
                 )
-            elif comparison.underfitting:
+            if comparison.underfitting:
                 return Decision(
                     color=DecisionColor.RED.value,
                     action=DecisionAction.AGGRESSIVE_LR_ADJUST.value,
@@ -132,39 +117,32 @@ class ThreeStateDecisionEngine:
                     should_rollback=False,
                     metadata={"delta_percent": delta, "diagnosis": "underfitting"},
                 )
-            else:
-                return Decision(
-                    color=DecisionColor.RED.value,
-                    action=DecisionAction.ROLLBACK.value,
-                    reason=(
-                        f"Score dropped {delta:+.2f}% — rolling back to best checkpoint "
-                        "and applying random perturbation."
-                    ),
-                    next_hyperparams=self._perturb_params(current_params),
-                    should_rollback=True,
-                    metadata={"delta_percent": delta, "diagnosis": "general"},
-                )
+            return Decision(
+                color=DecisionColor.RED.value,
+                action=DecisionAction.ROLLBACK.value,
+                reason=(
+                    f"Score dropped {delta:+.2f}% — rolling back to best checkpoint "
+                    "and applying random perturbation."
+                ),
+                next_hyperparams=self._perturb_params(current_params),
+                should_rollback=True,
+                metadata={"delta_percent": delta, "diagnosis": "general"},
+            )
 
-        # ---- YELLOW: oscillation within thresholds ----
         return Decision(
             color=DecisionColor.YELLOW.value,
             action=DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
             reason=(
-                f"Score change {delta:+.2f}% within oscillation band (±{GREEN_THRESHOLD}%). "
-                "Triggering local optimum escape."
+                f"Score change {delta:+.2f}% within oscillation band "
+                f"(±{self.green_threshold}%). Triggering local optimum escape."
             ),
-            next_hyperparams=current_params,  # Optuna random walk / SA will handle
+            next_hyperparams=current_params,
             should_rollback=False,
             metadata={"delta_percent": delta},
         )
 
-    # ------------------------------------------------------------------
-    # Parameter mutation helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _regularize_params(params: HyperParams) -> HyperParams:
-        """Increase regularization: reduce augmentation, increase weight_decay."""
         return HyperParams(
             **{
                 **params.model_dump(),
@@ -178,7 +156,6 @@ class ThreeStateDecisionEngine:
 
     @staticmethod
     def _aggressive_lr_params(params: HyperParams) -> HyperParams:
-        """Aggressively increase learning rate to escape underfitting plateau."""
         import random
 
         multiplier = random.uniform(2.0, 5.0)
@@ -192,7 +169,6 @@ class ThreeStateDecisionEngine:
 
     @staticmethod
     def _perturb_params(params: HyperParams) -> HyperParams:
-        """Apply small random perturbations to break out of local minima."""
         import random
 
         perturbed = params.model_dump()

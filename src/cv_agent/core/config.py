@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # YOLO model variants supported
@@ -107,9 +107,25 @@ class OptunaConfig(BaseModel):
 
     n_trials: int = 50
     search_strategy: Literal["bayesian", "random_walk", "simulated_annealing"] = "bayesian"
+    yellow_strategy: Literal["random_walk", "simulated_annealing", "bayesian"] = "random_walk"
     n_startup_trials: int = 10
     pruner: Literal["median", "hyperband", "none"] = "median"
     search_space: OptunaSearchSpace = Field(default_factory=OptunaSearchSpace)
+
+    def effective_yellow_strategy(self) -> str:
+        """YELLOW escape strategy; legacy ``search_strategy`` overrides when non-bayesian."""
+        if self.search_strategy in ("random_walk", "simulated_annealing"):
+            return self.search_strategy
+        return self.yellow_strategy
+
+
+class DecisionConfig(BaseModel):
+    """Three-state decision thresholds and escalation policy."""
+
+    green_threshold_pct: float = 3.0
+    red_threshold_pct: float = -5.0
+    red_escalation_count: int = 3
+    yellow_resets_red_count: bool = True
 
 
 class LLMConfig(BaseModel):
@@ -162,6 +178,7 @@ class TrainConfig(BaseModel):
     auto_prompt_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     optimize_for_class: str | None = None
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mlflow_uri: str = "http://localhost:5000"

@@ -45,7 +45,7 @@ class AskModeHandler:
         current_params: dict[str, Any] | None,
         checkpoint_path: str | None,
     ) -> DecisionReview:
-        """Show the AI recommendation and block for an explicit user choice."""
+        """Show the controller recommendation and block for an explicit user choice."""
         color = decision.get("color", "white")
         action = decision.get("action", "?")
         reason = decision.get("reason", "")
@@ -64,8 +64,8 @@ class AskModeHandler:
             choices = [
                 (
                     "apply_full",
-                    "Apply recommendation (rollback + param changes)" if should_rollback
-                    else "Apply recommendation (param changes)",
+                    "Apply rollback + rule-based recovery" if should_rollback
+                    else "Apply rule-based recovery (params)",
                 ),
             ]
             if should_rollback:
@@ -73,8 +73,8 @@ class AskModeHandler:
                     ("skip_rollback", "Apply param changes WITHOUT rollback"),
                 )
             choices.extend([
-                ("reject", "Reject recommendation — provide guidance"),
-                ("continue", "Keep current weights — no AI param changes"),
+                ("reject", "Reject — provide guidance instead"),
+                ("continue", "Keep current weights — skip param changes"),
             ])
             choice = select_action(
                 "How do you want to handle this RED round?",
@@ -85,9 +85,9 @@ class AskModeHandler:
             choice = select_action(
                 "How do you want to handle this YELLOW round?",
                 [
-                    ("apply_full", "Escape local optimum (AI recommendation)"),
+                    ("apply_full", "Apply local escape proposal (Optuna RW/SA)"),
                     ("guidance", "Add guidance for next round"),
-                    ("continue", "Continue without AI escape strategy"),
+                    ("continue", "Continue without escape — keep params"),
                 ],
                 default_key="apply_full",
             )
@@ -95,9 +95,9 @@ class AskModeHandler:
             choice = select_action(
                 "How do you want to proceed after this GREEN round?",
                 [
-                    ("apply_full", "Continue with AI plan (commit + Optuna search)"),
+                    ("apply_full", "Apply controller + Optuna proposal"),
                     ("guidance", "Add guidance for next round"),
-                    ("continue", "Continue without extra guidance"),
+                    ("continue", "Continue without Optuna changes"),
                 ],
                 default_key="apply_full",
             )
