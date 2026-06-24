@@ -126,7 +126,7 @@ class Evaluator:
             result.overfitting = self._detect_overfitting(df)
             result.underfitting = self._detect_underfitting(df)
 
-        # --- Compute reward score ---
+        # --- Compute reward score (CSV-only; may be updated after val enrichment) ---
         result.score = self.compute_reward(result)
 
         logger.info(
@@ -137,6 +137,73 @@ class Evaluator:
         )
 
         return result
+
+    def enrich_from_validation(
+        self,
+        result: RoundResult,
+        weights_path: Path,
+        data_yaml: Path,
+    ) -> RoundResult:
+        """Run model.val() to attach per-class metrics and a confusion matrix.
+
+        Updates ``result.metrics``, ``per_class_metrics``, ``confusion_matrix``,
+        and recomputes ``score`` (needed for ``--optimize-for`` weighting).
+        """
+        if not weights_path.exists():
+            logger.warning(f"Cannot run validation enrichment — weights missing: {weights_path}")
+            return result
+
+        try:
+            from ultralytics import YOLO
+
+            logger.info(f"Running validation enrichment on {weights_path.name} ...")
+            val_result = YOLO(str(weights_path)).val(
+                data=str(data_yaml),
+                plots=False,
+                verbose=False,
+            )
+        except Exception as e:
+            logger.warning(f"Validation enrichment failed: {e}")
+            return result
+
+        box = getattr(val_result, "box", None)
+        if box is not None:
+            self._merge_per_class_array(result, "mAP50", getattr(box, "ap50", None))
+            self._merge_per_class_array(result, "precision", getattr(box, "p", None))
+            self._merge_per_class_array(result, "recall", getattr(box, "r", None))
+
+            map50 = getattr(box, "map50", None)
+            if map50 is not None:
+                result.metrics["mAP50"] = float(map50)
+
+        cm = getattr(val_result, "confusion_matrix", None)
+        if cm is not None and getattr(cm, "matrix", None) is not None:
+            result.confusion_matrix = np.asarray(cm.matrix)
+
+        result.score = self.compute_reward(result)
+        logger.info(
+            f"Validation enrichment complete: score={result.score:.4f}, "
+            f"per_class_keys={sum(1 for k in result.metrics if k.startswith('mAP50_class_'))}"
+        )
+        return result
+
+    @staticmethod
+    def _merge_per_class_array(
+        result: RoundResult,
+        metric_name: str,
+        values: np.ndarray | list | None,
+    ) -> None:
+        """Store per-class metric values on ``result`` using cv_agent key conventions."""
+        if values is None:
+            return
+        arr = np.asarray(values).flatten()
+        for class_id, value in enumerate(arr):
+            if np.isnan(value):
+                continue
+            key = f"{metric_name}_class_{class_id}"
+            result.metrics[key] = float(value)
+            bucket = result.per_class_metrics.setdefault(class_id, {})
+            bucket[metric_name] = float(value)
 
     # ------------------------------------------------------------------
     # Overfitting / underfitting detection

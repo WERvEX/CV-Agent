@@ -279,7 +279,14 @@ def resume(ctx: click.Context, run_dir: Path) -> None:
 
     log_info(f"Resuming from: {run_dir}")
 
+    base_config = _load_config(ctx.obj["config_path"], {})
+    interaction_mode = _prompt_interaction_mode(
+        base_config.interaction_mode,
+        ctx.obj.get("interaction_override"),
+    )
+    config = base_config.model_copy(update={"interaction_mode": interaction_mode})
+
     from cv_agent.core.engine import TrainingEngine
 
     engine = TrainingEngine()
-    engine.resume(run_dir)
+    engine.resume(run_dir, config)

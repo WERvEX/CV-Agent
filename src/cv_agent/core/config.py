@@ -151,6 +151,7 @@ class TrainConfig(BaseModel):
     epochs_per_round: int = 3
     max_rounds: int = 10
     interaction_mode: Literal["auto", "ask"] = "ask"
+    auto_prompt_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     optimize_for_class: str | None = None
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)

@@ -52,7 +52,8 @@ class YOLOTrainer:
         hyperparams: HyperParams,
         epochs: int,
         run_dir: Path,
-        resume_from: Path | None = None,
+        initial_weights: Path | None = None,
+        resume_training: bool = False,
     ) -> TrainArtifacts:
         """Run a single YOLO training session.
 
@@ -62,7 +63,8 @@ class YOLOTrainer:
             hyperparams: HyperParams model instance.
             epochs: Number of epochs for this round.
             run_dir: Target directory for this experiment (runs/exp_xxx/).
-            resume_from: Optional checkpoint to resume from.
+            initial_weights: Optional checkpoint to fine-tune from (new training run).
+            resume_training: If True, use Ultralytics' resume=True to continue an interrupted run.
 
         Returns:
             TrainArtifacts with paths to output files.
@@ -70,10 +72,13 @@ class YOLOTrainer:
         Raises:
             RuntimeError: If training fails.
         """
-        model_path = f"{model_variant}.pt"
-        logger.info(f"Loading model: {model_path}")
-
-        model = YOLO(model_path)
+        if initial_weights is not None and initial_weights.exists():
+            model = YOLO(str(initial_weights))
+            logger.info(f"Fine-tuning from checkpoint: {initial_weights}")
+        else:
+            model_path = f"{model_variant}.pt"
+            model = YOLO(model_path)
+            logger.info(f"Loading pretrained weights: {model_path}")
 
         # Build training arguments from HyperParams
         train_args = {
@@ -117,10 +122,9 @@ class YOLOTrainer:
             "fliplr": hyperparams.fliplr,
         }
 
-        if resume_from is not None and resume_from.exists():
+        if resume_training:
             train_args["resume"] = True
-            model = YOLO(str(resume_from))
-            logger.info(f"Resuming from checkpoint: {resume_from}")
+            logger.info("Ultralytics resume=True — continuing interrupted training run.")
 
         logger.info(f"Starting training with {epochs} epochs, batch={hyperparams.batch}, lr0={hyperparams.lr0}")
         logger.info(f"Augmentations: mosaic={hyperparams.mosaic}, mixup={hyperparams.mixup}")
@@ -214,5 +218,7 @@ class YOLOTrainer:
             project=str(run_dir.parent),
             name=run_dir.name,
             exist_ok=True,
+            plots=False,
+            verbose=False,
         )
-        return metrics.results_dict if hasattr(metrics, "results_dict") else {}
+        return metrics

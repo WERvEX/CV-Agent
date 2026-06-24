@@ -28,13 +28,16 @@ from cv_agent.decision.optuna_optimizer import OptunaOptimizer
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
 from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
+from cv_agent.interaction.mode_control import offer_mode_control
 from cv_agent.interaction.types import SessionQuit
 from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
-    load_metrics,
+    load_latest_decision_log,
+    restore_session_state,
     save_artifacts,
     save_data_gap_report,
+    save_session_state,
     snapshot_best_checkpoint,
 )
 from cv_agent.trainer.evaluator import Evaluator, RoundResult
@@ -135,27 +138,82 @@ class TrainingEngine:
             self._mlflow.end_session()
             self._print_summary()
 
-    def resume(self, run_dir: Path) -> None:
+    def resume(self, run_dir: Path, config: TrainConfig) -> None:
         """Resume training from a prior experiment directory."""
         if not run_dir.exists():
             log_error(f"Run directory not found: {run_dir}")
             return
 
-        # Load config from args.yaml
         args_yaml = run_dir / "args.yaml"
         if not args_yaml.exists():
             log_error(f"args.yaml not found in {run_dir} — cannot resume.")
             return
 
-        log_info(f"Resuming from {run_dir}...")
-        log_warning("Resume mode: full implementation pending (Phase 10).")
-        log_info("Loading config and decision log from run directory...")
+        session = restore_session_state(run_dir)
+        if session is None:
+            log_error(
+                f"No session_state.json (or recoverable decision log) in {run_dir} — cannot resume."
+            )
+            return
 
-        # Placeholder — Phase 10 will fully implement resume
+        self._config = config
         self._run_dir = run_dir
-        metrics = load_metrics(run_dir)
-        if metrics:
-            log_info(f"Loaded metrics: best_score={metrics.get('best_score', 'N/A')}")
+        log_file = run_dir / "cv_agent.log"
+        setup_logging(log_file=log_file)
+
+        log_info(f"Resuming from {run_dir} ...")
+        log_info(
+            f"Restored round {session['round_num']}/{config.max_rounds}, "
+            f"best_round={session.get('best_round')}, best_score={session.get('best_score')}"
+        )
+
+        session_mode = session.get("interaction_mode")
+        if session_mode in ("ask", "auto"):
+            config = config.model_copy(update={"interaction_mode": session_mode})
+            self._config = config
+
+        self._setup_subsystems(config)
+        self._decision_log = load_latest_decision_log(run_dir)
+        self._round_num = int(session["round_num"])
+        self._best_score = float(session.get("best_score", 0.0))
+        self._best_round = int(session.get("best_round", self._round_num))
+        params_data = session.get("current_params") or config.initial_hyperparams.model_dump()
+        self._current_params = HyperParams(**params_data)
+
+        best_ckpt = session.get("best_checkpoint")
+        if best_ckpt:
+            ckpt_path = run_dir / best_ckpt
+            if ckpt_path.exists():
+                self._best_checkpoint = ckpt_path
+            else:
+                log_warning(f"Saved best checkpoint missing: {ckpt_path}")
+
+        history_scores = session.get("history_scores", [])
+        self._history = [
+            RoundResult(round_num=i + 1, run_dir=run_dir, score=float(s), metrics={"mAP50": float(s)})
+            for i, s in enumerate(history_scores)
+        ]
+
+        self._mlflow.start_session(run_dir.name)
+
+        if self._round_num >= config.max_rounds:
+            log_warning("Session already reached max_rounds — nothing to resume.")
+            self._print_summary()
+            return
+
+        self._state = TrainingLoopState.TRAIN
+        try:
+            self._main_loop()
+        except SessionQuit as e:
+            log_warning(f"Training stopped by user: {e}")
+        except KeyboardInterrupt:
+            log_warning("Training interrupted by user.")
+        except Exception as e:
+            log_error(f"Fatal error: {e}")
+            logger.exception("Fatal error traceback:")
+        finally:
+            self._mlflow.end_session()
+            self._print_summary()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -270,12 +328,14 @@ class TrainingEngine:
         self._mlflow.log_params(self._current_params.model_dump())
 
         try:
+            initial_weights = self._resolve_initial_weights()
             artifacts = self._yolo_trainer.train(
                 model_variant=self._config.model_variant,
                 data_yaml=self._config.data.data_yaml,
                 hyperparams=self._current_params,
                 epochs=self._config.epochs_per_round,
                 run_dir=self._run_dir,
+                initial_weights=initial_weights,
             )
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE
@@ -314,6 +374,13 @@ class TrainingEngine:
             run_dir=self._run_dir,
         )
 
+        weights_for_val = artifacts.best_pt if artifacts.best_pt.exists() else artifacts.last_pt
+        round_result = self._evaluator.enrich_from_validation(
+            round_result,
+            weights_path=weights_for_val,
+            data_yaml=config.data.data_yaml,
+        )
+
         comparison = self._evaluator.compare(round_result, self._history)
 
         # Log metrics to MLflow
@@ -330,6 +397,7 @@ class TrainingEngine:
             metrics=round_result.metrics | {
                 "score": round_result.score,
                 "best_score": max(self._best_score, round_result.score),
+                "best_round": self._best_round,
                 "overfitting": round_result.overfitting,
                 "underfitting": round_result.underfitting,
             },
@@ -360,6 +428,20 @@ class TrainingEngine:
         )
 
         checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
+
+        # Pick Ask/Auto for **this round's** decision review (before review runs).
+        try:
+            review_mode = offer_mode_control(
+                current_mode=self._config.interaction_mode,
+                round_num=self._round_num,
+                auto_timeout_seconds=self._config.auto_prompt_seconds,
+            )
+        except SessionQuit:
+            self._mlflow.end_round()
+            self._state = TrainingLoopState.DONE
+            return
+        if review_mode != self._config.interaction_mode:
+            self._set_interaction_mode(review_mode)
 
         # --- Review decision with user (ask) or auto-approve ---
         try:
@@ -443,6 +525,7 @@ class TrainingEngine:
 
         # Save decision log
         save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
+        self._save_session_state()
 
         self._mlflow.end_round()
 
@@ -556,7 +639,11 @@ class TrainingEngine:
             best_metrics=best_metrics,
             class_names=class_names,
             trigger_round=self._round_num,
-            confusion_snapshot=None,
+            confusion_snapshot=(
+                round_result.confusion_matrix.tolist()
+                if round_result and round_result.confusion_matrix is not None
+                else None
+            ),
         )
 
         # Save the report
@@ -578,6 +665,65 @@ class TrainingEngine:
     # Setup & helpers
     # ------------------------------------------------------------------
 
+    def _resolve_initial_weights(self) -> Path | None:
+        """Checkpoint to fine-tune from on rounds after the first."""
+        if self._round_num <= 1:
+            return None
+
+        if self._best_checkpoint and self._best_checkpoint.exists():
+            log_info(f"Round {self._round_num}: continuing from best snapshot {self._best_checkpoint.name}")
+            return self._best_checkpoint
+
+        last_pt = self._run_dir / "weights" / "last.pt"
+        if last_pt.exists():
+            log_info(f"Round {self._round_num}: continuing from {last_pt.name}")
+            return last_pt
+
+        best_pt = self._run_dir / "weights" / "best.pt"
+        if best_pt.exists():
+            log_info(f"Round {self._round_num}: continuing from {best_pt.name}")
+            return best_pt
+
+        log_warning(f"Round {self._round_num}: no checkpoint found — falling back to pretrained weights.")
+        return None
+
+    def _save_session_state(self) -> None:
+        """Write session_state.json for cv_agent resume."""
+        best_ckpt: str | None = None
+        if self._best_checkpoint:
+            try:
+                best_ckpt = self._best_checkpoint.relative_to(self._run_dir).as_posix()
+            except ValueError:
+                best_ckpt = str(self._best_checkpoint)
+
+        save_session_state(
+            self._run_dir,
+            {
+                "round_num": self._round_num,
+                "best_score": self._best_score,
+                "best_round": self._best_round,
+                "best_checkpoint": best_ckpt,
+                "history_scores": [r.score for r in self._history],
+                "current_params": self._current_params.model_dump(),
+                "interaction_mode": self._config.interaction_mode,
+            },
+        )
+
+    def _set_interaction_mode(self, mode: str) -> None:
+        """Hot-swap the interaction handler for the remainder of the session."""
+        if mode not in ("ask", "auto"):
+            return
+        if mode == self._config.interaction_mode and self._interaction is not None:
+            return
+
+        self._config = self._config.model_copy(update={"interaction_mode": mode})
+        if mode == "auto":
+            self._interaction = AutoModeHandler()
+        else:
+            self._interaction = AskModeHandler()
+        self._supplementer = DataSupplementer(interaction=self._interaction)
+        log_info(f"Interaction mode is now [bold cyan]{mode}[/bold cyan].")
+
     def _setup_subsystems(self, config: TrainConfig) -> None:
         """Initialize all subsystem components."""
         setup_logging(log_file=self._run_dir / "cv_agent.log")
@@ -586,13 +732,9 @@ class TrainingEngine:
         self._validator = DatasetValidator(config.data)
 
         # Interaction handler
-        if config.interaction_mode == "auto":
-            self._interaction = AutoModeHandler()
-        else:
-            self._interaction = AskModeHandler()
+        self._set_interaction_mode(config.interaction_mode)
 
-        # Data supplementer
-        self._supplementer = DataSupplementer(interaction=self._interaction)
+        # Data supplementer — refreshed inside _set_interaction_mode
 
         # YOLO trainer
         self._yolo_trainer = YOLOTrainer()

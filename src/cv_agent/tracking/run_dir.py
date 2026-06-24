@@ -180,6 +180,67 @@ def load_metrics(run_dir: Path) -> dict[str, Any] | None:
         return json.load(fh)
 
 
+def save_session_state(run_dir: Path, state: dict[str, Any]) -> None:
+    """Persist resumable session state for a training run."""
+    path = run_dir / "session_state.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2, default=str, ensure_ascii=False)
+    logger.info(f"Saved session state to {path}")
+
+
+def load_session_state(run_dir: Path) -> dict[str, Any] | None:
+    """Load session_state.json if present."""
+    path = run_dir / "session_state.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def hyperparams_from_args_yaml(args_yaml: Path) -> dict[str, Any]:
+    """Extract HyperParams-compatible fields from an Ultralytics args.yaml."""
+    import yaml
+
+    if not args_yaml.exists():
+        return {}
+    with open(args_yaml, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    from cv_agent.core.config import HyperParams
+
+    keys = set(HyperParams.model_fields.keys())
+    return {k: data[k] for k in keys if k in data}
+
+
+def restore_session_state(run_dir: Path) -> dict[str, Any] | None:
+    """Load session state, or reconstruct a minimal snapshot from legacy artifacts."""
+    state = load_session_state(run_dir)
+    if state is not None:
+        return state
+
+    decision_log = load_latest_decision_log(run_dir)
+    if not decision_log:
+        return None
+
+    metrics = load_metrics(run_dir) or {}
+    args_data = hyperparams_from_args_yaml(run_dir / "args.yaml")
+
+    best_checkpoint = None
+    snap_dir = run_dir / "best_snapshots"
+    if snap_dir.exists():
+        snaps = sorted(snap_dir.glob("round_*_best.pt"))
+        if snaps:
+            best_checkpoint = snaps[-1].relative_to(run_dir).as_posix()
+
+    return {
+        "round_num": len(decision_log),
+        "best_score": float(metrics.get("best_score", metrics.get("score", 0.0))),
+        "best_round": int(metrics.get("best_round", len(decision_log))),
+        "best_checkpoint": best_checkpoint,
+        "history_scores": [float(metrics.get("score", 0.0))],
+        "current_params": args_data,
+    }
+
+
 def find_latest_run_dir(output_root: Path) -> Path | None:
     """Find the most recent experiment directory.
 

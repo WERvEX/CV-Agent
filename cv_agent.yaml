@@ -5,6 +5,7 @@ model_variant: yolo26n
 epochs_per_round: 3 # demo default for COCO128 smoke runs; raise for real training
 max_rounds: 7
 interaction_mode: ask # auto | ask
+auto_prompt_seconds: 10 # Auto mode: countdown before next round (A=Ask, Q=Quit)
 
 # Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)
 optimize_for_class: null # e.g., "vehicle", "person"
