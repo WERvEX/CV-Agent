@@ -1,0 +1,39 @@
+# Copy to cv_agent.local.yaml on your machine or server (git-ignored).
+#   cp cv_agent.local.yaml.example cv_agent.local.yaml
+#
+# Secrets: prefer env var on servers — do NOT commit real keys.
+#   export CV_AGENT_LLM_KEY="sk-..."
+
+# --- LLM (optional; heuristic fallback works without a key) ---
+llm:
+  api_key: ""  # or set CV_AGENT_LLM_KEY in the environment
+
+# --- Server / formal test (use with Docker + GPU) ---
+interaction_mode: auto   # required for non-interactive containers
+epochs_per_round: 50     # raise to 100+ for large datasets
+max_rounds: 10
+model_variant: yolo26s   # n/s/m/l/x — match GPU memory
+
+data:
+  # Absolute path inside the container after you mount datasets
+  data_yaml: /data/your_dataset.yaml
+  min_images: 100
+  min_ann_per_class: 50
+  min_pixel_area: 64
+  validate_brightness: true
+  validate_angles: true
+
+# --- Optional: MLflow on a team server ---
+# mlflow_uri: http://mlflow.internal:5000
+# experiment_name: cv_agent_team
+
+# --- Quick smoke test on server (COCO128 only) — uncomment instead of block above ---
+# interaction_mode: auto
+# epochs_per_round: 3
+# max_rounds: 3
+# model_variant: yolo26n
+# data:
+#   data_yaml: coco128.yaml
+#   min_images: 50
+#   min_ann_per_class: 1
+#   validate_brightness: false
