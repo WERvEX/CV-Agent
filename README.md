@@ -54,18 +54,6 @@ Run fully unattended (`auto`) or stay in the loop (`ask`) with diffs, confirmati
 
 ---
 
-## How It Works
-
-Each training session runs a state machine until `max_rounds` is reached or the user quits:
-
-```
-INIT → VALIDATE_DATA → TRAIN → EVALUATE → DECIDE ─┐
-         │                    ↑                    │
-         └→ DATA_SUPPLEMENT ──┘                    │
-                              └────────────────────┘
-                                        ↓
-                                      DONE
-```
 
 | Component | Responsibility |
 |-----------|----------------|
