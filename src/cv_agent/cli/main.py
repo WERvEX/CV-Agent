@@ -315,10 +315,12 @@ def run(
     _check_env()
     print_banner(__version__)
 
-    # Bootstrap a dataset if none was provided (or the path is missing).
-    # Falls back to downloading COCO128 so the loop can run out of the box.
+    # Resolve dataset from CLI or config, then bootstrap/download if needed.
     from cv_agent.data.bootstrap import ensure_dataset
-    resolved_data_yaml = ensure_dataset(data_yaml)
+
+    pre_config = _load_config(ctx.obj["config_path"], {})
+    requested_data_yaml = data_yaml if data_yaml is not None else pre_config.data.data_yaml
+    resolved_data_yaml = ensure_dataset(requested_data_yaml)
 
     # Build CLI overrides dict (interaction mode prompted after base config load)
     overrides: dict = {}

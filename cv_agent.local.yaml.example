@@ -15,13 +15,15 @@ max_rounds: 10
 model_variant: yolo26s   # n/s/m/l/x — match GPU memory
 
 data:
-  # Absolute path inside the container after you mount datasets
-  data_yaml: /data/your_dataset.yaml
+  data_yaml: coco.yaml
   min_images: 100
-  min_ann_per_class: 50
+  min_ann_per_class: 10
   min_pixel_area: 64
   validate_brightness: true
   validate_angles: true
+
+initial_hyperparams:
+  batch: 16
 
 # --- Optional: MLflow on a team server ---
 # mlflow_uri: http://mlflow.internal:5000
