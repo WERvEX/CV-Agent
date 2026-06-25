@@ -78,8 +78,8 @@ class OptunaSearchSpace(BaseModel):
     Users can widen or tighten ranges in their config YAML.
     """
 
-    lr0: tuple[float, float] = (0.001, 0.1)
-    lrf: tuple[float, float] = (0.001, 0.1)
+    lr0: tuple[float, float] = (0.001, 0.01)
+    lrf: tuple[float, float] = (0.001, 0.01)
     batch: list[int] = Field(default_factory=lambda: [4, 8, 16, 32])
     momentum: tuple[float, float] = (0.8, 0.98)
     weight_decay: tuple[float, float] = (0.0, 0.001)
@@ -109,7 +109,8 @@ class OptunaConfig(BaseModel):
     search_strategy: Literal["bayesian", "random_walk", "simulated_annealing"] = "bayesian"
     yellow_strategy: Literal["random_walk", "simulated_annealing", "bayesian"] = "random_walk"
     n_startup_trials: int = 10
-    pruner: Literal["median", "hyperband", "none"] = "median"
+    pruner: Literal["median", "hyperband", "none"] = "none"
+    random_walk_min_step_scale: float = 0.02
     search_space: OptunaSearchSpace = Field(default_factory=OptunaSearchSpace)
 
     def effective_yellow_strategy(self) -> str:
@@ -123,7 +124,12 @@ class DecisionConfig(BaseModel):
     """Three-state decision thresholds and escalation policy."""
 
     green_threshold_pct: float = 3.0
+    green_threshold_abs: float | None = None
     red_threshold_pct: float = -5.0
+    red_threshold_abs: float | None = None
+    soft_red_threshold_pct: float = -3.0
+    accept_marginal_improvement: bool = True
+    marginal_green_use_optuna: bool = False
     red_escalation_count: int = 3
     yellow_resets_red_count: bool = True
 
@@ -137,6 +143,8 @@ class LLMConfig(BaseModel):
     max_tokens: int = 4096
     temperature: float = 0.3
     max_calls_per_session: int = 20
+    guidance_enabled: bool = True
+    guidance_fallback_regex: bool = True
 
     @field_validator("api_key")
     @classmethod

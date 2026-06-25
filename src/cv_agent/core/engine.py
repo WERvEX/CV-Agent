@@ -23,7 +23,11 @@ from cv_agent.core.state_machine import (
 from cv_agent.data.gap_report import DataGapReport
 from cv_agent.data.supplement import DataSupplementer
 from cv_agent.data.validator import DatasetValidator, ValidationIssue
-from cv_agent.decision.guidance import apply_guidance_constraints, parse_guidance
+from cv_agent.decision.guidance import (
+    apply_guidance_adjustments,
+    parse_guidance,
+    parse_guidance_with_llm,
+)
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
@@ -54,6 +58,7 @@ from cv_agent.ui.console import (
     log_success,
     log_warning,
     print_final_summary,
+    print_guidance_applied,
     print_round_evaluation,
     print_section,
 )
@@ -212,6 +217,11 @@ class TrainingEngine:
             RoundResult(round_num=i + 1, run_dir=run_dir, score=float(s), metrics={"mAP50": float(s)})
             for i, s in enumerate(history_scores)
         ]
+
+        self._red_tracker.count = int(session.get("red_streak", 0))
+        optuna_count = session.get("optuna_trial_count")
+        if optuna_count is not None and self._optuna is not None:
+            self._optuna.set_trial_count(int(optuna_count))
 
         self._mlflow.start_session(run_dir.name)
 
@@ -403,6 +413,7 @@ class TrainingEngine:
         comparison = self._evaluator.compare(round_result, self._history)
 
         best_hist = comparison.best_historical
+        class_names = Evaluator.load_class_names(config.data.data_yaml)
         print_round_evaluation(
             round_num=self._round_num,
             score=round_result.score,
@@ -414,6 +425,7 @@ class TrainingEngine:
             underfitting=comparison.underfitting,
             optimize_for_class=self._config.optimize_for_class,
             optimize_class_id=self._evaluator.optimize_for_class_id,
+            class_names=class_names,
         )
 
         # Log metrics to MLflow
@@ -461,7 +473,6 @@ class TrainingEngine:
         # Classify
         decision = self._decision_engine.decide(
             comparison=comparison,
-            red_count=self._red_tracker.count,
             current_params=self._current_params,
         )
 
@@ -525,21 +536,50 @@ class TrainingEngine:
             if proposal_from_optuna:
                 self._optuna.abandon_pending()
             proposed_params = decision.next_hyperparams
+        elif (
+            decision.action == DecisionAction.ACCEPT.value
+            and decision.metadata.get("green_tier") == "marginal"
+            and not self._config.decision.marginal_green_use_optuna
+        ):
+            if proposal_from_optuna:
+                self._optuna.abandon_pending()
+            proposed_params = self._current_params
         # else: keep preview proposed_params from Optuna / escape strategy
 
         guidance_text = review.feedback or ""
-        constraints = parse_guidance(guidance_text)
-        if constraints.raw_text:
-            proposed_params = apply_guidance_constraints(
+        params_before_guidance = proposed_params.model_dump()
+        constraints = self._parse_user_guidance(
+            guidance_text,
+            proposed_params=proposed_params,
+            decision=decision,
+            round_result=round_result,
+        )
+        if constraints.raw_text or constraints.adjustments or constraints.multipliers:
+            if constraints.replace_proposal and proposal_from_optuna:
+                self._optuna.abandon_pending()
+                proposal_from_optuna = False
+            proposed_params = apply_guidance_adjustments(
                 self._current_params,
                 proposed_params,
                 constraints,
+                self._config.optuna.search_space,
             )
             if proposal_from_optuna and (
                 proposed_params.model_dump() != decision.proposed_hyperparams.model_dump()
             ):
                 self._optuna.abandon_pending()
+            decision.proposed_hyperparams = proposed_params
             decision.metadata["guidance_constraints"] = constraints.to_metadata()
+            decision.metadata["guidance_source"] = constraints.source
+            print_guidance_applied(
+                before_params=params_before_guidance,
+                after_params=proposed_params.model_dump(),
+                source=constraints.source,
+                reason=constraints.reason,
+                raw_text=constraints.raw_text,
+                constraints_meta=constraints.to_metadata(),
+                pause=isinstance(self._interaction, AskModeHandler),
+            )
 
         # --- Three-state routing ---
 
@@ -572,17 +612,37 @@ class TrainingEngine:
                     return
                 if cfg_review.feedback:
                     self._llm_context_accumulator += f"\n[Config feedback]: {cfg_review.feedback}"
-                    cfg_constraints = parse_guidance(cfg_review.feedback)
-                    if cfg_constraints.raw_text:
-                        proposed_params = apply_guidance_constraints(
+                    cfg_constraints = self._parse_user_guidance(
+                        cfg_review.feedback,
+                        proposed_params=proposed_params,
+                        decision=decision,
+                        round_result=round_result,
+                    )
+                    if cfg_constraints.raw_text or cfg_constraints.adjustments or cfg_constraints.multipliers:
+                        params_before_cfg = proposed_params.model_dump()
+                        if cfg_constraints.replace_proposal and proposal_from_optuna:
+                            self._optuna.abandon_pending()
+                            proposal_from_optuna = False
+                        proposed_params = apply_guidance_adjustments(
                             self._current_params,
                             proposed_params,
                             cfg_constraints,
+                            self._config.optuna.search_space,
                         )
                         if proposal_from_optuna:
                             self._optuna.abandon_pending()
+                        decision.proposed_hyperparams = proposed_params
                         decision.metadata["config_feedback_constraints"] = (
                             cfg_constraints.to_metadata()
+                        )
+                        print_guidance_applied(
+                            before_params=params_before_cfg,
+                            after_params=proposed_params.model_dump(),
+                            source=cfg_constraints.source,
+                            reason=cfg_constraints.reason,
+                            raw_text=cfg_constraints.raw_text,
+                            constraints_meta=cfg_constraints.to_metadata(),
+                            pause=True,
                         )
                 if cfg_review.approved:
                     self._current_params = proposed_params
@@ -613,6 +673,41 @@ class TrainingEngine:
     # Decision handlers
     # ------------------------------------------------------------------
 
+    def _parse_user_guidance(
+        self,
+        text: str,
+        proposed_params: HyperParams,
+        decision: Decision,
+        round_result: RoundResult,
+    ):
+        """Parse user guidance via LLM (Ask mode) or regex fallback."""
+        from cv_agent.decision.guidance import GuidanceConstraints
+
+        if not text or not text.strip():
+            return GuidanceConstraints()
+
+        if (
+            isinstance(self._interaction, AskModeHandler)
+            and self._config.llm.guidance_enabled
+        ):
+            return parse_guidance_with_llm(
+                text,
+                advisor=self._llm_advisor,
+                current_params=self._current_params,
+                proposed_params=proposed_params,
+                decision_summary={
+                    "color": decision.color,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "metadata": decision.metadata,
+                },
+                metrics=round_result.metrics,
+                search_space=self._config.optuna.search_space,
+                fallback_regex=self._config.llm.guidance_fallback_regex,
+            )
+
+        return parse_guidance(text)
+
     def _preview_proposed_params(
         self,
         decision: Decision,
@@ -620,16 +715,38 @@ class TrainingEngine:
         round_score: float,
     ) -> tuple[HyperParams, bool]:
         """Build next-round params for review display (may create pending Optuna trial)."""
-        if decision.action in (
-            DecisionAction.ACCEPT.value,
-            DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
-        ):
+        rule_based_actions = (
+            DecisionAction.MILD_REGULARIZE.value,
+            DecisionAction.MILD_LR_ADJUST.value,
+            DecisionAction.ROLLBACK.value,
+            DecisionAction.ROLLBACK_REGULARIZE.value,
+            DecisionAction.AGGRESSIVE_LR_ADJUST.value,
+        )
+        if decision.action in rule_based_actions:
+            self._optuna.abandon_pending()
+            if decision.action == DecisionAction.ROLLBACK.value:
+                return self._optuna._propose_random_walk(self._current_params), False
+            return decision.next_hyperparams, False
+
+        if decision.action == DecisionAction.ACCEPT.value:
+            green_tier = decision.metadata.get("green_tier", "hard")
+            if green_tier == "marginal" and not self._config.decision.marginal_green_use_optuna:
+                return self._current_params, False
             params, from_optuna = self._optuna.propose_next(
                 self._current_params,
                 color,
                 current_score=round_score,
             )
             return params, from_optuna
+
+        if decision.action == DecisionAction.ESCAPE_LOCAL_OPTIMUM.value:
+            params, from_optuna = self._optuna.propose_next(
+                self._current_params,
+                color,
+                current_score=round_score,
+            )
+            return params, from_optuna
+
         self._optuna.abandon_pending()
         return decision.next_hyperparams, False
 
@@ -748,12 +865,44 @@ class TrainingEngine:
         )
         log_info(f"Data gap report saved to {self._run_dir}")
 
+        self._current_params = self._apply_loss_weight_suggestions(
+            cm_analysis.loss_weight_suggestions,
+            decision,
+            self._current_params,
+        )
+
         # Reset red counter
         self._red_tracker.reset()
 
         # Transition to data supplement mode
         self._pending_issues = self._gap_report_to_issues(gap_report)
         self._state = TrainingLoopState.DATA_SUPPLEMENT
+
+    @staticmethod
+    def _apply_loss_weight_suggestions(
+        suggestions: dict[str, float],
+        decision: Decision,
+        current_params: HyperParams,
+    ) -> HyperParams:
+        """Apply CM analysis loss weight suggestions (clamped 0.1–20)."""
+        if not suggestions:
+            return current_params
+
+        updated = current_params.model_dump()
+        applied: dict[str, float] = {}
+        for key in ("box", "cls", "dfl"):
+            if key not in suggestions:
+                continue
+            val = max(0.1, min(20.0, float(suggestions[key])))
+            updated[key] = val
+            applied[key] = val
+
+        if not applied:
+            return current_params
+
+        decision.metadata["loss_weight_adjustment"] = applied
+        log_info(f"Applied CM loss weight suggestions: {applied}")
+        return HyperParams(**updated)
 
     # ------------------------------------------------------------------
     # Setup & helpers
@@ -859,6 +1008,8 @@ class TrainingEngine:
                 "history_scores": [r.score for r in self._history],
                 "current_params": self._current_params.model_dump(),
                 "interaction_mode": self._config.interaction_mode,
+                "red_streak": self._red_tracker.count,
+                "optuna_trial_count": self._optuna.trial_count if self._optuna else 0,
             },
         )
 

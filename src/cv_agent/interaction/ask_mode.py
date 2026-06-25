@@ -117,6 +117,12 @@ class AskModeHandler:
                 rollback_approved=should_rollback,
                 feedback=feedback,
             )
+        if choice == "guidance":
+            return DecisionReview(
+                apply_recommendation=True,
+                rollback_approved=should_rollback,
+                feedback=feedback,
+            )
         if choice == "skip_rollback":
             return DecisionReview(
                 apply_recommendation=True,

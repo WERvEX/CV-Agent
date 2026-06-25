@@ -17,8 +17,9 @@ from typing import Any
 import numpy as np
 from openai import OpenAI
 
-from cv_agent.core.config import LLMConfig
+from cv_agent.core.config import HyperParams, LLMConfig, OptunaSearchSpace
 from cv_agent.data.gap_report import DataGapReport, DataSource, ProblemClass, build_data_gap_report
+from cv_agent.decision.guidance import GuidanceConstraints
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -85,6 +86,44 @@ Return a JSON object with this structure:
         "dfl": float
     }}
 }}
+"""
+
+GUIDANCE_PROMPT = """You are a YOLO hyperparameter tuning assistant. The user gave natural-language
+guidance for the next training round. Convert it into structured parameter constraints.
+
+Decision summary:
+{decision_summary}
+
+Current hyperparameters:
+{current_params}
+
+Proposed hyperparameters (from Optuna/controller):
+{proposed_params}
+
+Round metrics:
+{metrics}
+
+Search space bounds (stay within these when setting values):
+{search_space}
+
+User guidance:
+{feedback}
+
+Return JSON only:
+{{
+    "frozen_fields": ["field names to keep unchanged from current params"],
+    "multipliers": {{"field_name": float}},
+    "set_values": {{"field_name": float_or_int}},
+    "replace_proposal": false,
+    "reason": "brief explanation"
+}}
+
+Rules:
+- Use only field names from: lr0, lrf, batch, momentum, weight_decay, mosaic, mixup, copy_paste,
+  hsv_h, hsv_s, hsv_v, degrees, translate, scale, shear, perspective, flipud, fliplr, box, cls, dfl
+- batch must be one of the search_space batch choices
+- set replace_proposal true only if user explicitly wants to ignore the proposed params entirely
+- prefer multipliers (e.g. 0.5 for half) over absolute values when user says relative changes
 """
 
 GAP_REPORT_PROMPT = """You are a computer vision data strategist. A YOLO object detection model has
@@ -188,6 +227,61 @@ class LLMAdvisor:
         # Fallback to heuristic
         logger.info("Using heuristic confusion matrix analysis (fallback mode).")
         return self._heuristic_analyze_cm(confusion, class_names, metrics)
+
+    def interpret_guidance(
+        self,
+        feedback: str,
+        current_params: HyperParams,
+        proposed_params: HyperParams,
+        decision_summary: dict[str, Any],
+        metrics: dict[str, float],
+        search_space: OptunaSearchSpace,
+    ) -> GuidanceConstraints | None:
+        """Parse user natural-language guidance into structured param constraints."""
+        if not self._client or not self._has_api_key:
+            return None
+
+        prompt = GUIDANCE_PROMPT.format(
+            decision_summary=json.dumps(decision_summary, indent=2),
+            current_params=json.dumps(current_params.model_dump(), indent=2),
+            proposed_params=json.dumps(proposed_params.model_dump(), indent=2),
+            metrics=json.dumps(metrics, indent=2),
+            search_space=json.dumps(search_space.model_dump(), indent=2),
+            feedback=feedback.strip(),
+        )
+
+        response = self._call_llm(prompt)
+        if response is None:
+            return None
+
+        try:
+            data = json.loads(response)
+
+            def _dict_field(key: str) -> dict:
+                raw = data.get(key)
+                return raw if isinstance(raw, dict) else {}
+
+            def _list_field(key: str) -> list:
+                raw = data.get(key)
+                return raw if isinstance(raw, list) else []
+
+            return GuidanceConstraints(
+                frozen_fields=set(_list_field("frozen_fields")),
+                only_lr=False,
+                adjustments={
+                    k: float(v) for k, v in _dict_field("set_values").items()
+                },
+                multipliers={
+                    k: float(v) for k, v in _dict_field("multipliers").items()
+                },
+                replace_proposal=bool(data.get("replace_proposal", False)),
+                reason=str(data.get("reason") or ""),
+                source="llm",
+                raw_text=feedback.strip(),
+            )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as e:
+            logger.warning(f"Failed to parse LLM guidance response: {e}")
+            return None
 
     def _llm_analyze_cm(
         self,

@@ -46,6 +46,7 @@ class EvaluationComparison:
     current: RoundResult
     best_historical: RoundResult | None
     delta_percent: float = 0.0
+    delta_abs: float = 0.0
     overfitting: bool = False
     underfitting: bool = False
 
@@ -301,12 +302,14 @@ class Evaluator:
                 current=current,
                 best_historical=None,
                 delta_percent=0.0,
+                delta_abs=0.0,
                 overfitting=current.overfitting,
                 underfitting=current.underfitting,
             )
 
+        delta_abs = current.score - best.score
         if best.score > 0:
-            delta_pct = ((current.score - best.score) / best.score) * 100.0
+            delta_pct = (delta_abs / best.score) * 100.0
         else:
             delta_pct = 0.0 if current.score == 0 else 100.0
 
@@ -314,6 +317,7 @@ class Evaluator:
             current=current,
             best_historical=best,
             delta_percent=delta_pct,
+            delta_abs=delta_abs,
             overfitting=current.overfitting,
             underfitting=current.underfitting,
         )

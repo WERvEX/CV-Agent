@@ -62,11 +62,11 @@ Run fully unattended (`auto`) or stay in the loop (`ask`) with diffs, confirmati
 | `YoloTrainer` + `Evaluator` | Ultralytics training and reward scoring |
 | `ThreeStateDecisionEngine` | Green / Yellow / Red classification and recovery actions |
 | `OptunaOptimizer` | Next-round hyperparameter proposals |
-| `LLMAdvisor` | Confusion-matrix and data-gap analysis on **3× Red escalation only** |
+| `LLMAdvisor` | Ask-mode guidance parsing + Red×3 confusion-matrix / data-gap analysis |
 | `CheckpointManager` | Top-N saves, manual saves, resume metadata |
 | `MLflowManager` | Experiment tracking |
 
-**Normal rounds do not call the LLM.** Hyperparameter changes come from the rule controller + Optuna. User feedback in Ask mode is parsed by rule-based `guidance` (e.g. “only lr”, “don't change mosaic”), not by the LLM.
+**Normal rounds** use the rule controller + Optuna. The LLM is invoked when the user provides natural-language guidance in **Ask mode** (with API key), or after **3× Red escalation** for data-gap analysis.
 
 ---
 
@@ -210,11 +210,15 @@ After each round, the reward score is compared to the historical best:
 
 | State | Condition (vs. best) | Typical action |
 |-------|----------------------|----------------|
-| Green | improvement ≥ `green_threshold_pct` (default 3%) | Commit best checkpoint; Optuna Bayesian proposal for next round |
-| Yellow | between green and red thresholds | Local-optimum escape (random walk / SA / Bayesian per config) |
-| Red | drop ≤ `red_threshold_pct` (default −5%) | Diagnose overfit/underfit; rollback and/or aggressive param change |
+| Green (hard) | Δ% ≥ `green_threshold_pct` or Δ_abs ≥ `green_threshold_abs` | Commit checkpoint; Optuna Bayesian proposal |
+| Green (marginal) | `0 < Δ% < green_threshold` when `accept_marginal_improvement: true` | Commit checkpoint; keep params unless `marginal_green_use_optuna: true` |
+| Yellow | between `soft_red_threshold_pct` and green thresholds | Diagnostic mild adjust (overfit/underfit) or local-optimum escape |
+| Red (soft) | `soft_red_threshold_pct` ≥ Δ% > `red_threshold_pct` | Mild regularize / LR adjust without rollback |
+| Red (hard) | Δ% ≤ `red_threshold_pct` or Δ_abs ≤ `red_threshold_abs` | Rollback + rule-based recovery (overfit / underfit / general) |
 
 The **first round** is always accepted as the Green baseline.
+
+Overfitting or underfitting detected in the Yellow or soft-Red bands triggers **mild** parameter adjustments instead of blind random-walk escape.
 
 ### Red escalation (3× consecutive Reds)
 
@@ -222,10 +226,11 @@ When `red_escalation_count` (default 3) is hit:
 
 1. Force rollback to the historical best checkpoint
 2. LLM (or heuristic fallback) analyzes the confusion matrix
-3. Writes `data_gap_report.md` / `.json`
-4. Enters **Data Supplement Mode**
+3. Applies suggested `box` / `cls` / `dfl` loss weights to the next round (clamped 0.1–20)
+4. Writes `data_gap_report.md` / `.json`
+5. Enters **Data Supplement Mode**
 
-`yellow_resets_red_count: true` (default) resets the Red streak after a Yellow round.
+`yellow_resets_red_count: true` (default) resets the Red streak after a Yellow round. `session_state.json` persists `red_streak` and `optuna_trial_count` for resume.
 
 ---
 
@@ -240,7 +245,8 @@ When `red_escalation_count` (default 3) is hit:
 Key behaviors:
 
 - Each run uses its own `optuna_study.db` under the experiment directory
-- `n_trials` caps how many `ask()` calls Optuna makes per session; after the budget, proposals keep current params
+- `n_trials` caps how many `ask()` calls Optuna makes per session; counter syncs with the study DB on resume
+- `pruner: none` by default — each round reports one final score (`tell` once), so Median/Hyperband pruners have no effect
 - Only scores from **actually executed** proposed params are reported to Optuna; mismatches mark the trial `FAIL`
 - Search space is fully configurable in YAML (`optuna.search_space`)
 
@@ -382,7 +388,12 @@ initial_hyperparams:
 
 decision:
   green_threshold_pct: 3.0
+  green_threshold_abs: null
   red_threshold_pct: -5.0
+  red_threshold_abs: null
+  soft_red_threshold_pct: -3.0
+  accept_marginal_improvement: true
+  marginal_green_use_optuna: false
   red_escalation_count: 3
   yellow_resets_red_count: true
 
@@ -390,9 +401,10 @@ optuna:
   n_trials: 50
   yellow_strategy: random_walk   # random_walk | simulated_annealing | bayesian
   n_startup_trials: 10
-  pruner: median                 # median | hyperband | none
+  pruner: none                   # median | hyperband | none (none recommended)
+  random_walk_min_step_scale: 0.02
   search_space:
-    lr0: [0.001, 0.1]
+    lr0: [0.001, 0.01]
     batch: [4, 8, 16, 32]
     mosaic: [0.0, 1.0]
     # ... widen or narrow any range without code changes
@@ -406,6 +418,8 @@ llm:
   api_key: ""                  # use env var or cv_agent.local.yaml
   model: deepseek-v4-flash
   max_calls_per_session: 20
+  guidance_enabled: true
+  guidance_fallback_regex: true
 
 mlflow_uri: http://localhost:5000
 experiment_name: cv_agent
@@ -420,14 +434,14 @@ output_root: runs
 
 Default backend: **DeepSeek** (OpenAI-compatible API). Any OpenAI-compatible endpoint works — change `api_base` and `model` in config.
 
-The LLM is used **only** after 3 consecutive Red rounds:
+The LLM is used in two places:
 
-1. Confusion-matrix analysis
-2. Structured data-gap report generation
+1. **Ask-mode guidance** (when the user enters natural-language feedback at the DECIDE prompt): `interpret_guidance()` parses constraints and parameter adjustments; falls back to regex rules if no API key or on failure (`llm.guidance_enabled`, `llm.guidance_fallback_regex`).
+2. **Red×3 escalation**: confusion-matrix analysis, data-gap report, and one-time application of suggested `box` / `cls` / `dfl` loss weights.
 
-It is **not** on the hot path for normal Green/Yellow/Red hyperparameter decisions. LLM-suggested loss weights are reported but **not** automatically applied to YOLO training.
+Normal Green/Yellow/Red hyperparameter proposals still come from the rule controller + Optuna. User feedback in Ask mode is no longer limited to regex phrases like “only lr” when an API key is configured.
 
-Without an API key, or when the call limit / network fails, `cv_agent` falls back to heuristic statistical analysis and the closed loop continues.
+Without an API key, or when the call limit / network fails, `cv_agent` falls back to heuristic analysis / regex guidance and the closed loop continues.
 
 ---
 

@@ -63,7 +63,31 @@ class OptunaOptimizer:
             load_if_exists=True,
         )
 
-        logger.info(f"Optuna study initialized ({len(self._study.trials)} prior trials loaded)")
+        self._sync_trial_count_from_study()
+        logger.info(
+            f"Optuna study initialized ({len(self._study.trials)} prior trials, "
+            f"budget used {self._trial_count}/{self.config.n_trials})"
+        )
+
+    @property
+    def trial_count(self) -> int:
+        return self._trial_count
+
+    def set_trial_count(self, count: int) -> None:
+        """Restore in-memory trial budget counter (e.g. on session resume)."""
+        self._trial_count = max(0, count)
+
+    def _sync_trial_count_from_study(self) -> None:
+        if self._study is None:
+            return
+        import optuna
+
+        terminal = (
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.FAIL,
+            optuna.trial.TrialState.PRUNED,
+        )
+        self._trial_count = sum(1 for t in self._study.trials if t.state in terminal)
 
     def report_result(self, score: float, actual_params: HyperParams) -> None:
         """Report the completed round for the pending Optuna trial, if params match."""
@@ -216,7 +240,8 @@ class OptunaOptimizer:
         return random.choice(neighbors)
 
     def _propose_random_walk(self, current_params: HyperParams) -> HyperParams:
-        self._rw_step_scale *= 0.95
+        min_scale = self.config.random_walk_min_step_scale
+        self._rw_step_scale = max(self._rw_step_scale * 0.95, min_scale)
         ss = self.search_space
         current = current_params.model_dump()
         perturbed: dict = {}
@@ -247,26 +272,28 @@ class OptunaOptimizer:
         current_params: HyperParams,
         current_score: float | None = None,
     ) -> HyperParams:
+        neighbor = self._random_neighbor(current_params)
+        score = current_score if current_score is not None else 0.0
+
         if self._sa_best_params is None:
             self._sa_best_params = current_params
-            self._sa_best_score = current_score or 0.0
+            self._sa_best_score = score
             self._sa_temperature = 1.0
 
-        neighbor = self._random_neighbor(current_params)
-        score = current_score or 0.0
         delta = score - self._sa_best_score
-
-        if delta > 0:
+        if score > self._sa_best_score:
             self._sa_best_params = current_params
             self._sa_best_score = score
-            result = current_params
+
+        if delta >= 0:
+            result = neighbor
             accepted = True
         else:
             prob = math.exp(delta / max(self._sa_temperature, 1e-8))
             accepted = random.random() < prob
             result = neighbor if accepted else current_params
             if accepted:
-                logger.info(f"SA accepted worse proposal with probability {prob:.3f}")
+                logger.info(f"SA accepted neighbor with probability {prob:.3f}")
 
         self._sa_temperature *= self._sa_decay
         self._sa_temperature = max(self._sa_temperature, 0.01)

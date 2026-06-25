@@ -70,3 +70,15 @@ def test_trial_budget_exhausted_skips_new_ask(tmp_path, monkeypatch):
 
     assert from_optuna is False
     assert optimizer._pending_trial is None
+
+
+def test_set_trial_count_respects_budget(tmp_path, monkeypatch):
+    optimizer = OptunaOptimizer(OptunaConfig(n_trials=3), study_db=tmp_path / "study.db")
+    monkeypatch.setattr(optimizer, "_init_study", lambda: None)
+    optimizer._study = FakeStudy()
+    optimizer.set_trial_count(3)
+
+    params, from_optuna = optimizer.propose_next(HyperParams(), "green")
+
+    assert from_optuna is False
+    assert params.lr0 == HyperParams().lr0

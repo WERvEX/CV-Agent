@@ -16,11 +16,6 @@ from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-# Module-level defaults (used when no DecisionConfig is provided)
-GREEN_THRESHOLD = 3.0
-RED_THRESHOLD = -5.0
-RED_ESCALATION_COUNT = 3
-
 
 @dataclass
 class Decision:
@@ -60,14 +55,14 @@ class ThreeStateDecisionEngine:
 
     def __init__(self, config: DecisionConfig | None = None) -> None:
         cfg = config or DecisionConfig()
+        self._cfg = cfg
         self.green_threshold = cfg.green_threshold_pct
         self.red_threshold = cfg.red_threshold_pct
-        self.red_escalation_count = cfg.red_escalation_count
+        self.soft_red_threshold = cfg.soft_red_threshold_pct
 
     def decide(
         self,
         comparison: EvaluationComparison,
-        red_count: int,
         current_params: HyperParams,
     ) -> Decision:
         """Classify the round and produce a Decision."""
@@ -78,67 +73,197 @@ class ThreeStateDecisionEngine:
                 reason="First round — accepting as baseline.",
                 next_hyperparams=current_params,
                 should_rollback=False,
+                metadata={"green_tier": "hard"},
             )
 
-        delta = comparison.delta_percent
+        delta_pct = comparison.delta_percent
+        delta_abs = comparison.delta_abs
+        meta_base: dict[str, Any] = {
+            "delta_percent": delta_pct,
+            "delta_abs": delta_abs,
+        }
 
-        if delta >= self.green_threshold:
+        if self._is_hard_green(delta_pct, delta_abs):
             return Decision(
                 color=DecisionColor.GREEN.value,
                 action=DecisionAction.ACCEPT.value,
-                reason=f"mAP improved by {delta:+.2f}% — committing checkpoint.",
+                reason=f"Score improved by {delta_pct:+.2f}% — committing checkpoint.",
                 next_hyperparams=current_params,
                 should_rollback=False,
-                metadata={"delta_percent": delta},
+                metadata={**meta_base, "green_tier": "hard"},
             )
 
-        if delta <= self.red_threshold:
-            if comparison.overfitting:
-                return Decision(
-                    color=DecisionColor.RED.value,
-                    action=DecisionAction.ROLLBACK_REGULARIZE.value,
-                    reason=(
-                        f"Overfitting detected (train↓ val↑). Score dropped {delta:+.2f}%. "
-                        "Rolling back to best checkpoint and increasing regularization."
-                    ),
-                    next_hyperparams=self._regularize_params(current_params),
-                    should_rollback=True,
-                    metadata={"delta_percent": delta, "diagnosis": "overfitting"},
-                )
-            if comparison.underfitting:
-                return Decision(
-                    color=DecisionColor.RED.value,
-                    action=DecisionAction.AGGRESSIVE_LR_ADJUST.value,
-                    reason=(
-                        f"Underfitting detected (both losses plateau). Score dropped {delta:+.2f}%. "
-                        "Aggressively adjusting learning rate."
-                    ),
-                    next_hyperparams=self._aggressive_lr_params(current_params),
-                    should_rollback=False,
-                    metadata={"delta_percent": delta, "diagnosis": "underfitting"},
-                )
+        if self._is_marginal_green(delta_pct):
+            return Decision(
+                color=DecisionColor.GREEN.value,
+                action=DecisionAction.ACCEPT.value,
+                reason=(
+                    f"Marginal improvement {delta_pct:+.2f}% "
+                    f"(below {self.green_threshold}% threshold) — accepting checkpoint."
+                ),
+                next_hyperparams=current_params,
+                should_rollback=False,
+                metadata={**meta_base, "green_tier": "marginal"},
+            )
+
+        if self._is_hard_red(delta_pct, delta_abs):
+            return self._hard_red_decision(comparison, current_params, delta_pct, meta_base)
+
+        if self._is_soft_red(delta_pct, delta_abs):
+            return self._soft_red_decision(comparison, current_params, delta_pct, meta_base)
+
+        return self._yellow_decision(comparison, current_params, delta_pct, meta_base)
+
+    def _is_hard_green(self, delta_pct: float, delta_abs: float) -> bool:
+        if delta_pct >= self.green_threshold:
+            return True
+        threshold_abs = self._cfg.green_threshold_abs
+        return threshold_abs is not None and delta_abs >= threshold_abs
+
+    def _is_marginal_green(self, delta_pct: float) -> bool:
+        return self._cfg.accept_marginal_improvement and delta_pct > 0
+
+    def _is_hard_red(self, delta_pct: float, delta_abs: float) -> bool:
+        if delta_pct <= self.red_threshold:
+            return True
+        threshold_abs = self._cfg.red_threshold_abs
+        return threshold_abs is not None and delta_abs <= threshold_abs
+
+    def _is_soft_red(self, delta_pct: float, delta_abs: float) -> bool:
+        if self._is_hard_red(delta_pct, delta_abs):
+            return False
+        return delta_pct <= self.soft_red_threshold
+
+    def _hard_red_decision(
+        self,
+        comparison: EvaluationComparison,
+        current_params: HyperParams,
+        delta_pct: float,
+        meta_base: dict[str, Any],
+    ) -> Decision:
+        if comparison.overfitting:
             return Decision(
                 color=DecisionColor.RED.value,
-                action=DecisionAction.ROLLBACK.value,
+                action=DecisionAction.ROLLBACK_REGULARIZE.value,
                 reason=(
-                    f"Score dropped {delta:+.2f}% — rolling back to best checkpoint "
-                    "and applying random perturbation."
+                    f"Hard RED — overfitting (train↓ val↑). Score dropped {delta_pct:+.2f}%. "
+                    "Rolling back and increasing regularization."
                 ),
-                next_hyperparams=self._perturb_params(current_params),
+                next_hyperparams=self._regularize_params(current_params),
                 should_rollback=True,
-                metadata={"delta_percent": delta, "diagnosis": "general"},
+                metadata={**meta_base, "red_tier": "hard", "diagnosis": "overfitting"},
             )
+        if comparison.underfitting:
+            return Decision(
+                color=DecisionColor.RED.value,
+                action=DecisionAction.AGGRESSIVE_LR_ADJUST.value,
+                reason=(
+                    f"Hard RED — underfitting (loss plateau). Score dropped {delta_pct:+.2f}%. "
+                    "Rolling back and aggressively adjusting learning rate."
+                ),
+                next_hyperparams=self._aggressive_lr_params(current_params),
+                should_rollback=True,
+                metadata={**meta_base, "red_tier": "hard", "diagnosis": "underfitting"},
+            )
+        return Decision(
+            color=DecisionColor.RED.value,
+            action=DecisionAction.ROLLBACK.value,
+            reason=(
+                f"Hard RED — score dropped {delta_pct:+.2f}%. "
+                "Rolling back to best checkpoint and applying perturbation."
+            ),
+            next_hyperparams=self._perturb_params(current_params),
+            should_rollback=True,
+            metadata={**meta_base, "red_tier": "hard", "diagnosis": "general"},
+        )
 
+    def _soft_red_decision(
+        self,
+        comparison: EvaluationComparison,
+        current_params: HyperParams,
+        delta_pct: float,
+        meta_base: dict[str, Any],
+    ) -> Decision:
+        if comparison.overfitting:
+            return Decision(
+                color=DecisionColor.RED.value,
+                action=DecisionAction.MILD_REGULARIZE.value,
+                reason=(
+                    f"Soft RED — overfitting with score {delta_pct:+.2f}% "
+                    f"(between {self.soft_red_threshold}% and {self.red_threshold}%). "
+                    "Applying mild regularization without rollback."
+                ),
+                next_hyperparams=self._mild_regularize_params(current_params),
+                should_rollback=False,
+                metadata={**meta_base, "red_tier": "soft", "diagnosis": "overfitting"},
+            )
+        if comparison.underfitting:
+            return Decision(
+                color=DecisionColor.RED.value,
+                action=DecisionAction.MILD_LR_ADJUST.value,
+                reason=(
+                    f"Soft RED — underfitting with score {delta_pct:+.2f}%. "
+                    "Mildly increasing learning rate without rollback."
+                ),
+                next_hyperparams=self._mild_lr_params(current_params),
+                should_rollback=False,
+                metadata={**meta_base, "red_tier": "soft", "diagnosis": "underfitting"},
+            )
+        return Decision(
+            color=DecisionColor.RED.value,
+            action=DecisionAction.MILD_REGULARIZE.value,
+            reason=(
+                f"Soft RED — score {delta_pct:+.2f}% in [{self.soft_red_threshold}%, "
+                f"{self.red_threshold}%]. Mild regularization without rollback."
+            ),
+            next_hyperparams=self._mild_regularize_params(current_params),
+            should_rollback=False,
+            metadata={**meta_base, "red_tier": "soft", "diagnosis": "general"},
+        )
+
+    def _yellow_decision(
+        self,
+        comparison: EvaluationComparison,
+        current_params: HyperParams,
+        delta_pct: float,
+        meta_base: dict[str, Any],
+    ) -> Decision:
+        band_lo = self.soft_red_threshold
+        band_hi = self.green_threshold
+        if comparison.overfitting:
+            return Decision(
+                color=DecisionColor.YELLOW.value,
+                action=DecisionAction.MILD_REGULARIZE.value,
+                reason=(
+                    f"YELLOW — overfitting detected, score {delta_pct:+.2f}% "
+                    f"in band [{band_lo}%, {band_hi}%). Mild regularization."
+                ),
+                next_hyperparams=self._mild_regularize_params(current_params),
+                should_rollback=False,
+                metadata={**meta_base, "diagnosis": "overfitting"},
+            )
+        if comparison.underfitting:
+            return Decision(
+                color=DecisionColor.YELLOW.value,
+                action=DecisionAction.MILD_LR_ADJUST.value,
+                reason=(
+                    f"YELLOW — underfitting detected, score {delta_pct:+.2f}% "
+                    f"in band [{band_lo}%, {band_hi}%). Mild LR adjustment."
+                ),
+                next_hyperparams=self._mild_lr_params(current_params),
+                should_rollback=False,
+                metadata={**meta_base, "diagnosis": "underfitting"},
+            )
         return Decision(
             color=DecisionColor.YELLOW.value,
             action=DecisionAction.ESCAPE_LOCAL_OPTIMUM.value,
             reason=(
-                f"Score change {delta:+.2f}% within oscillation band "
-                f"(±{self.green_threshold}%). Triggering local optimum escape."
+                f"YELLOW — score change {delta_pct:+.2f}% in band "
+                f"[{band_lo}%, {band_hi}%). Triggering local optimum escape."
             ),
             next_hyperparams=current_params,
             should_rollback=False,
-            metadata={"delta_percent": delta},
+            metadata=meta_base,
         )
 
     @staticmethod
@@ -151,6 +276,29 @@ class ThreeStateDecisionEngine:
                 "mixup": max(params.mixup * 0.5, 0.0),
                 "copy_paste": max(params.copy_paste * 0.5, 0.0),
                 "degrees": max(params.degrees * 0.5, 0.0),
+            }
+        )
+
+    @staticmethod
+    def _mild_regularize_params(params: HyperParams) -> HyperParams:
+        return HyperParams(
+            **{
+                **params.model_dump(),
+                "weight_decay": min(params.weight_decay * 1.5, 0.01),
+                "mosaic": max(params.mosaic * 0.7, 0.0),
+                "mixup": max(params.mixup * 0.7, 0.0),
+                "copy_paste": max(params.copy_paste * 0.7, 0.0),
+                "degrees": max(params.degrees * 0.7, 0.0),
+            }
+        )
+
+    @staticmethod
+    def _mild_lr_params(params: HyperParams) -> HyperParams:
+        return HyperParams(
+            **{
+                **params.model_dump(),
+                "lr0": min(params.lr0 * 1.5, 0.5),
+                "lrf": min(params.lrf * 1.5, 0.5),
             }
         )
 

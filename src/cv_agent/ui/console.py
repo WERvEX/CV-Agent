@@ -19,6 +19,9 @@ from rich.tree import Tree
 
 from cv_agent.ui.terminal_charts import format_delta, sparkline
 
+# Keys excluded from bulk metric tables (shown via per-class summary instead).
+_PER_CLASS_METRIC_PREFIXES = ("mAP50_class_", "precision_class_", "recall_class_")
+
 # Singleton console for the entire application
 console = Console()
 
@@ -224,6 +227,103 @@ def print_decision_recommendation(
     console.print()
 
 
+def summarize_per_class_map50(
+    metrics: dict[str, float],
+    class_names: dict[int, str] | None = None,
+    *,
+    worst_n: int = 3,
+    best_n: int = 3,
+) -> str | None:
+    """Compact one-line per-class mAP50 summary (count, avg, worst/best)."""
+    entries: list[tuple[str, float]] = []
+    for key, value in metrics.items():
+        if not key.startswith("mAP50_class_"):
+            continue
+        cid = int(key.rsplit("_", 1)[-1])
+        label = class_names.get(cid, str(cid)) if class_names else str(cid)
+        entries.append((label, float(value)))
+
+    if not entries:
+        return None
+
+    entries.sort(key=lambda item: item[1])
+    values = [v for _, v in entries]
+    avg = sum(values) / len(values)
+    parts = [
+        f"{len(entries)} classes",
+        f"avg {avg:.3f}",
+        f"min {values[0]:.3f}",
+        f"max {values[-1]:.3f}",
+    ]
+    if worst_n > 0:
+        worst = entries[:worst_n]
+        parts.append("low: " + ", ".join(f"{n} {v:.3f}" for n, v in worst))
+    if best_n > 0 and len(entries) > worst_n:
+        best = list(reversed(entries[-best_n:]))
+        parts.append("high: " + ", ".join(f"{n} {v:.3f}" for n, v in best))
+    return " | ".join(parts)
+
+
+def print_guidance_applied(
+    *,
+    before_params: dict[str, Any],
+    after_params: dict[str, Any],
+    source: str = "regex",
+    reason: str = "",
+    raw_text: str = "",
+    constraints_meta: dict[str, Any] | None = None,
+    pause: bool = False,
+) -> None:
+    """Show how user/LLM guidance changed hyperparameters before the next round."""
+    from cv_agent.interaction.diff_renderer import render_diff
+    from cv_agent.ui.prompts import press_enter_to_continue
+
+    changed = {
+        key: (before_params.get(key), after_params.get(key))
+        for key in sorted(set(before_params) | set(after_params))
+        if before_params.get(key) != after_params.get(key)
+    }
+
+    table = Table(
+        title="[bold cyan]Guidance Applied[/bold cyan]",
+        title_style="bold cyan",
+        show_header=False,
+        padding=(0, 1),
+    )
+    table.add_column("Field", style="bold cyan", width=18)
+    table.add_column("Value", style="bright_white")
+
+    table.add_row("Parser", f"[bold]{source.upper()}[/bold]")
+    if raw_text:
+        table.add_row("Your input", raw_text)
+    if reason:
+        table.add_row("Interpretation", reason)
+    if constraints_meta:
+        frozen = constraints_meta.get("frozen_fields") or []
+        if frozen:
+            table.add_row("Frozen", ", ".join(frozen))
+        mults = constraints_meta.get("multipliers") or {}
+        if mults:
+            table.add_row("Multipliers", ", ".join(f"{k}×{v}" for k, v in mults.items()))
+        sets = constraints_meta.get("adjustments") or {}
+        if sets:
+            table.add_row("Set values", ", ".join(f"{k}={v}" for k, v in sets.items()))
+
+    console.print()
+    if changed:
+        console.print(Panel(table, border_style="cyan"))
+        console.print(render_diff(before_params, after_params, title="Changes from guidance"))
+        log_success(f"Guidance applied — {len(changed)} parameter(s) updated ({source}).")
+    else:
+        table.add_row("Result", "[yellow]No parameter changes[/yellow] (check phrasing or frozen fields)")
+        console.print(Panel(table, border_style="yellow"))
+        log_warning("Guidance parsed but did not change any hyperparameters.")
+
+    if pause:
+        press_enter_to_continue("Press Enter to continue…")
+    console.print()
+
+
 def print_round_evaluation(
     *,
     round_num: int,
@@ -236,6 +336,7 @@ def print_round_evaluation(
     underfitting: bool = False,
     optimize_for_class: str | None = None,
     optimize_class_id: int | None = None,
+    class_names: dict[int, str] | None = None,
 ) -> None:
     """Print evaluation summary after a training round completes."""
     table = Table(
@@ -278,14 +379,9 @@ def print_round_evaluation(
                 f"mAP50={metrics[target_key]:.4f}",
             )
 
-    per_class = sorted(
-        (k, v) for k, v in metrics.items() if k.startswith("mAP50_class_")
-    )
-    if per_class and not optimize_for_class:
-        preview = ", ".join(f"{k.split('_')[-1]}={v:.3f}" for k, v in per_class[:6])
-        if len(per_class) > 6:
-            preview += f", … (+{len(per_class) - 6} classes)"
-        table.add_row("Per-class mAP50", preview)
+    per_class_summary = summarize_per_class_map50(metrics, class_names)
+    if per_class_summary and not optimize_for_class:
+        table.add_row("Per-class mAP50", f"[dim]{per_class_summary}[/dim]")
 
     console.print()
     console.print(table)
@@ -337,7 +433,10 @@ def print_metrics_table(metrics: dict[str, float], title: str = "Current Metrics
     table.add_column("Metric", style="bold", width=22)
     table.add_column("Value", style="bright_white", width=12)
 
-    items = list(metrics.items())
+    items = [
+        (k, v) for k, v in metrics.items()
+        if not any(k.startswith(p) for p in _PER_CLASS_METRIC_PREFIXES)
+    ]
     for i in range(0, len(items), 2):
         row = []
         for j in range(2):

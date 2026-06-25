@@ -39,6 +39,8 @@ class DecisionAction(Enum):
     ROLLBACK = "rollback"
     ROLLBACK_REGULARIZE = "rollback_regularize"
     AGGRESSIVE_LR_ADJUST = "aggressive_lr_adjust"
+    MILD_REGULARIZE = "mild_regularize"
+    MILD_LR_ADJUST = "mild_lr_adjust"
     ESCAPE_LOCAL_OPTIMUM = "escape_local_optimum"
     DATA_GAP_RESEARCH = "data_gap_research"
 

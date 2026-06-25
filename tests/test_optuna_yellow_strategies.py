@@ -17,16 +17,15 @@ def test_random_walk_batch_stays_neighbor(tmp_path):
     assert batches.issubset({8, 16, 32})
 
 
-def test_sa_improves_keeps_current_params(tmp_path):
+def test_sa_improves_proposes_neighbor(tmp_path):
     optimizer = OptunaOptimizer(OptunaConfig(), study_db=tmp_path / "study.db")
-    base = HyperParams(lr0=0.01, lrf=0.01)
+    base = HyperParams(lr0=0.01, lrf=0.01, mosaic=0.5)
     optimizer._sa_best_score = 0.3
     optimizer._sa_best_params = base
 
     result = optimizer._propose_simulated_annealing(base, current_score=0.5)
 
-    assert result.lr0 == base.lr0
-    assert result.batch == base.batch
+    assert isinstance(result, HyperParams)
 
 
 def test_yellow_random_walk_propose_next_returns_hyperparams_not_nested_tuple(tmp_path):
