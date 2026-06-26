@@ -124,7 +124,15 @@ Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO
 cv_agent run
 ```
 
-On first run, Ultralytics **auto-downloads** `yolo26s.pt` (~20 MB) and COCO (~20 GB) into `datasets/`.
+On first run, Ultralytics **auto-downloads** `yolo26s.pt` (~20 MB) and COCO (~20 GB) into `datasets/`. If the default Ultralytics CDN is slow, **prefetch on the host** first (GitHub mirror):
+
+```bash
+bash scripts/prefetch_coco.sh                    # default: GitHub mirror for labels
+LABEL_MIRROR=ghfast bash scripts/prefetch_coco.sh   # China-friendly GitHub proxy
+SKIP_IMAGES=1 bash scripts/prefetch_coco.sh      # labels only (~168 MB), then images later
+```
+
+Files land in `./datasets/`; Docker mount `-v "$(pwd)/datasets:/app/datasets"` reuses them.
 
 **Quick smoke test** (COCO128, ~7 MB):
 
