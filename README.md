@@ -116,15 +116,30 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Smoke test (COCO128)
+### First run (full COCO)
 
-Defaults in `cv_agent.yaml` target COCO128. No dataset path is required for a first run:
+Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 10 rounds.
 
 ```bash
 cv_agent run
 ```
 
-Ultralytics downloads COCO128 if needed. Expect a short idle period while the model and dataloader initialize before `Starting training for N epochs...` appears.
+On first run, Ultralytics **auto-downloads**:
+
+| Asset | What | Approx. size |
+|-------|------|----------------|
+| `yolo26s.pt` | Pretrained weights | ~20 MB |
+| `coco.yaml` dataset | train2017 + val2017 images & labels | ~20 GB |
+
+Downloads land under `datasets/` (dataset) and Ultralytics cache (weights). Expect a long idle period on first COCO download before `Starting training for N epochs...` appears.
+
+**Quick smoke test** (COCO128, ~7 MB download):
+
+```bash
+cv_agent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
+```
+
+For fewer epochs per round during smoke tests, add a `cv_agent.local.yaml` with `epochs_per_round: 3` (see `cv_agent.local.yaml.example` COCO128 block).
 
 ### Train on your dataset
 
@@ -210,14 +225,11 @@ docker run --rm -it \
   --gpus all \
   --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
   -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
   -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
   cv_agent:latest \
-  run --interaction auto \
-  --data-yaml /data/dataset.yaml \
-  --model yolo26s \
-  --max-rounds 10
+  run --interaction auto
 ```
 
 **Detached background**:
@@ -228,14 +240,11 @@ docker run -d \
   --gpus all \
   --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
   -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
   -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
   cv_agent:latest \
-  run --interaction auto \
-  --data-yaml /data/dataset.yaml \
-  --model yolo26s \
-  --max-rounds 20
+  run --interaction auto
 
 # Monitor (container stdout + file log under runs/)
 docker logs -f cv_agent_train
@@ -257,8 +266,9 @@ docker run --rm -it \
 | Mount / env | Purpose |
 |-------------|---------|
 | `-v .../runs:/app/runs` | Training artifacts, checkpoints, Optuna DB, `session_state.json` |
-| `-v .../cv_agent.local.yaml:/app/cv_agent.local.yaml:ro` | Server overrides (`interaction_mode: auto`, epochs, etc.) |
-| `-v /host/datasets:/data:ro` | Dataset images + `dataset.yaml` (paths in yaml must use `/data/...`) |
+| `-v .../datasets:/app/datasets` | Persist COCO / other Ultralytics auto-downloads (~20 GB for COCO) |
+| `-v .../cv_agent.local.yaml:/app/cv_agent.local.yaml:ro` | Server overrides (`interaction_mode: auto`, custom `data_yaml`, etc.) |
+| `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
 | `-e CV_AGENT_LLM_KEY=...` | Optional LLM key for Red×3 escalation (not used for per-round guidance in Auto) |
 | `--gpus all` | GPU access (omit only for CPU-only smoke tests) |
 
@@ -349,7 +359,7 @@ Commands:
 
 | Option | Description |
 |--------|-------------|
-| `--data-yaml PATH` | Dataset YAML (COCO128 bootstrap if omitted) |
+| `--data-yaml PATH` | Dataset YAML (`coco.yaml` auto-downloads if missing) |
 | `--model TEXT` | Model variant (`yolo26n`, `yolov8s`, `yolo11m`, …) |
 | `--max-rounds INT` | Override `max_rounds` |
 | `--optimize-for TEXT` | Class name to prioritize in reward |
@@ -546,9 +556,9 @@ Settings load from `cv_agent.yaml` (tracked). `cv_agent.local.yaml` (git-ignored
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `model_variant` | `yolo26n` | Ultralytics model slug |
-| `epochs_per_round` | `3` | Epochs per closed-loop round (raise for real training) |
-| `max_rounds` | `7` | Total rounds before stop |
+| `model_variant` | `yolo26s` | Ultralytics model slug |
+| `epochs_per_round` | `50` | Epochs per closed-loop round |
+| `max_rounds` | `10` | Total rounds before stop |
 | `interaction_mode` | `ask` | `ask` or `auto` |
 | `auto_prompt_seconds` | `10` | Auto mode countdown before approving a round |
 | `optimize_for_class` | `null` | Class name for weighted reward |
@@ -560,7 +570,7 @@ Settings load from `cv_agent.yaml` (tracked). `cv_agent.local.yaml` (git-ignored
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `data_yaml` | `coco128.yaml` | Dataset spec path |
+| `data_yaml` | `coco.yaml` | Dataset spec path (Ultralytics registry; auto-download) |
 | `min_images` | `50` | Minimum images per split |
 | `min_ann_per_class` | `1` | Minimum annotations per class |
 | `min_pixel_area` | `64` | Minimum object area (pixels) |
