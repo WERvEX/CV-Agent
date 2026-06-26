@@ -116,15 +116,23 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Smoke test (COCO128)
+### First run (full COCO)
 
-Defaults in `cv_agent.yaml` target COCO128. No dataset path is required for a first run:
+Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 10 rounds.
 
 ```bash
 cv_agent run
 ```
 
-Ultralytics downloads COCO128 if needed. Expect a short idle period while the model and dataloader initialize before `Starting training for N epochs...` appears.
+On first run, Ultralytics **auto-downloads** `yolo26s.pt` (~20 MB) and COCO (~20 GB) into `datasets/`.
+
+**Quick smoke test** (COCO128, ~7 MB):
+
+```bash
+cv_agent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
+```
+
+Add `epochs_per_round: 3` in `cv_agent.local.yaml` for shorter smoke rounds (see example file).
 
 ### Train on your dataset
 
@@ -546,9 +554,9 @@ Settings load from `cv_agent.yaml` (tracked). `cv_agent.local.yaml` (git-ignored
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `model_variant` | `yolo26n` | Ultralytics model slug |
-| `epochs_per_round` | `3` | Epochs per closed-loop round (raise for real training) |
-| `max_rounds` | `7` | Total rounds before stop |
+| `model_variant` | `yolo26s` | Ultralytics model slug |
+| `epochs_per_round` | `50` | Epochs per closed-loop round |
+| `max_rounds` | `10` | Total rounds before stop |
 | `interaction_mode` | `ask` | `ask` or `auto` |
 | `auto_prompt_seconds` | `10` | Auto mode countdown before approving a round |
 | `optimize_for_class` | `null` | Class name for weighted reward |
@@ -560,7 +568,7 @@ Settings load from `cv_agent.yaml` (tracked). `cv_agent.local.yaml` (git-ignored
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `data_yaml` | `coco128.yaml` | Dataset spec path |
+| `data_yaml` | `coco.yaml` | Dataset spec path (Ultralytics registry; auto-download) |
 | `min_images` | `50` | Minimum images per split |
 | `min_ann_per_class` | `1` | Minimum annotations per class |
 | `min_pixel_area` | `64` | Minimum object area (pixels) |
