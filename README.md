@@ -23,6 +23,7 @@ Run fully unattended (`auto`) on servers, or stay in the loop (`ask`) locally wi
 - [Quick Start](#quick-start)
 - [Running Locally](#running-locally)
 - [Running on a Server](#running-on-a-server)
+  - [Docker (recommended)](#docker-recommended)
 - [CLI Reference](#cli-reference)
 - [Interaction Modes](#interaction-modes)
 - [Decision System](#decision-system)
@@ -109,6 +110,8 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+**Server (Docker)** — see [Docker (recommended)](#docker-recommended) under [Running on a Server](#running-on-a-server).
+
 ---
 
 ## Quick Start
@@ -180,7 +183,88 @@ After each round in Ask mode you can:
 
 Use **Auto mode** when there is no TTY (Docker, `nohup`, cron, SSH batch jobs).
 
-### 1. Prepare config
+### Docker (recommended)
+
+On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed:
+
+```bash
+# Clone on the server (or copy the repo)
+git clone <your-repo-url>
+cd cv_agent
+
+# Build image
+docker build -t cv_agent:latest .
+
+# Prepare local config (git-ignored)
+cp cv_agent.local.yaml.example cv_agent.local.yaml
+# Edit cv_agent.local.yaml: interaction_mode: auto, data_yaml path inside container, etc.
+
+# Prepare dataset config — use container paths (see dataset.yaml.example)
+# e.g. host /data/datasets → mount at /data in container
+```
+
+**Foreground run** (attach to `tmux`/`screen` for long jobs):
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  --name cv_agent_train \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
+  -v /path/on/host/datasets:/data:ro \
+  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
+  cv_agent:latest \
+  run --interaction auto \
+  --data-yaml /data/dataset.yaml \
+  --model yolo26s \
+  --max-rounds 10
+```
+
+**Detached background**:
+
+```bash
+mkdir -p runs
+docker run -d \
+  --gpus all \
+  --name cv_agent_train \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
+  -v /path/on/host/datasets:/data:ro \
+  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
+  cv_agent:latest \
+  run --interaction auto \
+  --data-yaml /data/dataset.yaml \
+  --model yolo26s \
+  --max-rounds 20
+
+# Monitor (container stdout + file log under runs/)
+docker logs -f cv_agent_train
+tail -f runs/exp_*/cv_agent.log
+```
+
+**Resume** after container exit or host reboot:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
+  -v /path/on/host/datasets:/data:ro \
+  cv_agent:latest \
+  resume --run-dir runs/exp_<timestamp>
+```
+
+| Mount / env | Purpose |
+|-------------|---------|
+| `-v .../runs:/app/runs` | Training artifacts, checkpoints, Optuna DB, `session_state.json` |
+| `-v .../cv_agent.local.yaml:/app/cv_agent.local.yaml:ro` | Server overrides (`interaction_mode: auto`, epochs, etc.) |
+| `-v /host/datasets:/data:ro` | Dataset images + `dataset.yaml` (paths in yaml must use `/data/...`) |
+| `-e CV_AGENT_LLM_KEY=...` | Optional LLM key for Red×3 escalation (not used for per-round guidance in Auto) |
+| `--gpus all` | GPU access (omit only for CPU-only smoke tests) |
+
+> **Tip:** Paths in `dataset.yaml` must match **inside the container** (e.g. `path: /data/dataset`). See `dataset.yaml.example`.
+
+### 1. Prepare config (bare-metal / venv)
 
 ```bash
 cp cv_agent.local.yaml.example cv_agent.local.yaml
@@ -596,6 +680,8 @@ cv_agent/
 ├── cv_agent.yaml              # default config (tracked)
 ├── cv_agent.local.yaml.example
 ├── coco128.yaml               # demo dataset spec
+├── dataset.yaml.example       # custom dataset template (container paths)
+├── Dockerfile                 # GPU image for server deployment
 ├── pyproject.toml
 ├── src/cv_agent/
 │   ├── cli/                   # Click CLI
