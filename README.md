@@ -218,34 +218,20 @@ cp cv_agent.local.yaml.example cv_agent.local.yaml
 # e.g. host /data/datasets → mount at /data in container
 ```
 
-**Foreground run** (attach to `tmux`/`screen` for long jobs):
+**Foreground run** (attach to `tmux`/`screen` for long jobs). One line; **GPU 0 only** on an 8-GPU host (change `device=0` to e.g. `device=2` or `device=0,1` if needed):
 
 ```bash
-docker run --rm -it \
-  --gpus all \
-  --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest \
-  run --interaction auto
+docker run --rm -it --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest run --interaction auto
 ```
 
 **Detached background**:
 
 ```bash
-mkdir -p runs
-docker run -d \
-  --gpus all \
-  --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest \
-  run --interaction auto
+mkdir -p runs datasets
+docker run -d --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest run --interaction auto
+```
 
+```bash
 # Monitor (container stdout + file log under runs/)
 docker logs -f cv_agent_train
 tail -f runs/exp_*/cv_agent.log
@@ -254,13 +240,7 @@ tail -f runs/exp_*/cv_agent.log
 **Resume** after container exit or host reboot:
 
 ```bash
-docker run --rm -it \
-  --gpus all \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
-  cv_agent:latest \
-  resume --run-dir runs/exp_<timestamp>
+docker run --rm -it --gpus '"device=0"' -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" cv_agent:latest resume --run-dir runs/exp_<timestamp>
 ```
 
 | Mount / env | Purpose |
@@ -270,7 +250,7 @@ docker run --rm -it \
 | `-v .../cv_agent.local.yaml:/app/cv_agent.local.yaml:ro` | Server overrides (`interaction_mode: auto`, custom `data_yaml`, etc.) |
 | `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
 | `-e CV_AGENT_LLM_KEY=...` | Optional LLM key for Red×3 escalation (not used for per-round guidance in Auto) |
-| `--gpus all` | GPU access (omit only for CPU-only smoke tests) |
+| `--gpus '"device=0"'` | Expose **one** GPU (recommended on multi-GPU servers); use `device=0,1` for two, etc. Avoid `--gpus all` on shared 8-GPU hosts |
 
 > **Tip:** Paths in `dataset.yaml` must match **inside the container** (e.g. `path: /data/dataset`). See `dataset.yaml.example`.
 
