@@ -4,7 +4,7 @@ FROM ultralytics/ultralytics:latest
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md cv_agent.yaml coco128.yaml dataset.yaml.example ./
 COPY src/ src/
 RUN pip install --no-cache-dir -e .
 
@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -e .
 VOLUME ["/app/runs"]
 
 ENTRYPOINT ["cv_agent"]
-CMD ["run", "--interaction", "auto"]
+CMD ["run"]

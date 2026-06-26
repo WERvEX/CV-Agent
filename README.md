@@ -203,47 +203,29 @@ cd cv_agent
 # Build image
 docker build -t cv_agent:latest .
 
-# Prepare local config (git-ignored)
-cp cv_agent.local.yaml.example cv_agent.local.yaml
-# Edit cv_agent.local.yaml: interaction_mode: auto, data_yaml path inside container, etc.
-
-# Prepare dataset config — use container paths (see dataset.yaml.example)
-# e.g. host /data/datasets → mount at /data in container
+# Build image (bundles cv_agent.yaml; local overrides are optional)
+docker build -t cv_agent:latest .
+mkdir -p runs datasets
 ```
 
-**Foreground run** (attach to `tmux`/`screen` for long jobs):
+**Config:** defaults come from **`cv_agent.yaml`** (inside the image). **`cv_agent.local.yaml` is optional** — only create/mount it to override specific keys (usually the LLM API key). Do **not** mount a missing file path; Docker would create an empty **directory** and break startup.
+
+**Foreground run** (GPU 0 only, uses `cv_agent.yaml` defaults; `--interaction` goes **before** `run`):
 
 ```bash
-docker run --rm -it \
-  --gpus all \
-  --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest \
-  run --interaction auto \
-  --data-yaml /data/dataset.yaml \
-  --model yolo26s \
-  --max-rounds 10
+docker run --rm -it --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
+```
+
+**With optional local overrides** (only if `cv_agent.local.yaml` exists as a **file** on the host):
+
+```bash
+docker run --rm -it --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
 ```
 
 **Detached background**:
 
 ```bash
-mkdir -p runs
-docker run -d \
-  --gpus all \
-  --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest \
-  run --interaction auto \
-  --data-yaml /data/dataset.yaml \
-  --model yolo26s \
-  --max-rounds 20
+docker run -d --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
 
 # Monitor (container stdout + file log under runs/)
 docker logs -f cv_agent_train
@@ -253,44 +235,36 @@ tail -f runs/exp_*/cv_agent.log
 **Resume** after container exit or host reboot:
 
 ```bash
-docker run --rm -it \
-  --gpus all \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v /path/on/host/datasets:/data:ro \
-  cv_agent:latest \
-  resume --run-dir runs/exp_<timestamp>
+docker run --rm -it --gpus '"device=0"' -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" cv_agent:latest resume --run-dir runs/exp_<timestamp>
 ```
 
 | Mount / env | Purpose |
 |-------------|---------|
 | `-v .../runs:/app/runs` | Training artifacts, checkpoints, Optuna DB, `session_state.json` |
-| `-v .../cv_agent.local.yaml:/app/cv_agent.local.yaml:ro` | Server overrides (`interaction_mode: auto`, epochs, etc.) |
-| `-v /host/datasets:/data:ro` | Dataset images + `dataset.yaml` (paths in yaml must use `/data/...`) |
-| `-e CV_AGENT_LLM_KEY=...` | Optional LLM key for Red×3 escalation (not used for per-round guidance in Auto) |
-| `--gpus all` | GPU access (omit only for CPU-only smoke tests) |
+| `-v .../datasets:/app/datasets` | Persist COCO / other Ultralytics auto-downloads (~20 GB for COCO) |
+| `-v .../cv_agent.local.yaml:...:ro` | **Optional** — only when the file exists; overrides selected keys |
+| `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
+| `-e CV_AGENT_LLM_KEY=...` | LLM key (preferred over putting secrets in local yaml) |
+| `--gpus '"device=0"'` | Expose one GPU on multi-GPU hosts |
 
 > **Tip:** Paths in `dataset.yaml` must match **inside the container** (e.g. `path: /data/dataset`). See `dataset.yaml.example`.
 
 ### 1. Prepare config (bare-metal / venv)
 
+Uses **`cv_agent.yaml` by default**. Create **`cv_agent.local.yaml` only if** you need to override keys or store a secret:
+
 ```bash
-cp cv_agent.local.yaml.example cv_agent.local.yaml
+cp cv_agent.local.yaml.example cv_agent.local.yaml   # optional
 ```
 
-Edit for your server (see example file):
+Example local override (secrets only):
 
 ```yaml
-interaction_mode: auto
-epochs_per_round: 50
-max_rounds: 10
-model_variant: yolo26s
-
-data:
-  data_yaml: coco.yaml
-  min_images: 100
-  min_ann_per_class: 10
+llm:
+  api_key: "sk-..."   # or: export CV_AGENT_LLM_KEY="sk-..."
 ```
+
+For non-interactive servers, pass `--interaction auto` or uncomment `interaction_mode: auto` in local yaml.
 
 ### 2. Set secrets via environment (recommended on servers)
 
@@ -548,7 +522,7 @@ Evaluation prints a **compact per-class summary** (count, avg, min/max, worst/be
 
 ## Configuration Reference
 
-Settings load from `cv_agent.yaml` (tracked). `cv_agent.local.yaml` (git-ignored) is deep-merged on top. CLI flags override YAML.
+Settings load from **`cv_agent.yaml`** (tracked). If present, **`cv_agent.local.yaml`** (git-ignored) deep-merges on top — include only keys you want to override (typically `llm.api_key`). CLI flags override YAML. No local file is required.
 
 ### Training loop
 

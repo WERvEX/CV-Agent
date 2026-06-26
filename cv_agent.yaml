@@ -4,7 +4,7 @@
 model_variant: yolo26s
 epochs_per_round: 50
 max_rounds: 10
-interaction_mode: ask # server/Docker: set auto in cv_agent.local.yaml or --interaction auto
+interaction_mode: ask # use --interaction auto on Docker/nohup, or override in cv_agent.local.yaml
 auto_prompt_seconds: 10 # Auto mode: countdown before next round (A=Ask, Q=Quit)
 
 # Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)

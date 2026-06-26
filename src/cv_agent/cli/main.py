@@ -79,9 +79,14 @@ def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
         with open(config_path, encoding="utf-8") as fh:
             config_data = yaml.safe_load(fh) or {}
 
-    # Layer a git-ignored local override file on top (secrets go here).
+    # Layer a git-ignored local override file on top (optional; mainly for secrets).
     local_override = config_path.with_suffix(".local.yaml")
-    if local_override.exists():
+    if local_override.is_dir():
+        log_warning(
+            f"Ignoring {local_override.name}: path is a directory, not a file. "
+            "Remove it and create a YAML file, or omit the Docker volume mount."
+        )
+    elif local_override.is_file():
         log_info(f"Loading local overrides from {local_override.name} (git-ignored).")
         with open(local_override, encoding="utf-8") as fh:
             local_data = yaml.safe_load(fh) or {}

@@ -33,3 +33,23 @@ data:
 
     assert config.data.data_yaml == Path("override.yaml")
     assert config.data.min_ann_per_class == 1
+
+
+def test_load_config_skips_local_override_when_path_is_directory(tmp_path) -> None:
+    config_path = tmp_path / "cv_agent.yaml"
+    config_path.write_text("max_rounds: 10\n", encoding="utf-8")
+    (tmp_path / "cv_agent.local.yaml").mkdir()
+
+    config = _load_config(config_path, {})
+
+    assert config.max_rounds == 10
+
+
+def test_load_config_works_without_local_override_file(tmp_path) -> None:
+    config_path = tmp_path / "cv_agent.yaml"
+    config_path.write_text("max_rounds: 7\nepochs_per_round: 3\n", encoding="utf-8")
+
+    config = _load_config(config_path, {})
+
+    assert config.max_rounds == 7
+    assert config.epochs_per_round == 3
