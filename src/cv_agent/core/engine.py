@@ -368,6 +368,7 @@ class TrainingEngine:
                 initial_weights=initial_weights,
                 device=self._config.device,
                 workers=self._config.workers,
+                use_amp=self._config.use_amp,
             )
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE

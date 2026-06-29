@@ -229,9 +229,8 @@ docker run -dit --gpus '"device=0,1,2,3"' --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
   -v "$(pwd)/datasets:/app/datasets" \
   -v "$(pwd)/datasets:/datasets" \
+  -v "$(pwd)/weights:/app/weights:ro" \
   -v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro" \
-  -v "$(pwd)/weights/yolo26n.pt:/app/yolo26n.pt:ro" \
-  -v "$(pwd)/weights/yolo26s.pt:/app/yolo26s.pt:ro" \
   -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
   cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml
 ```

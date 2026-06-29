@@ -20,6 +20,16 @@ from cv_agent.utils.logging_setup import get_logger
 logger = get_logger(__name__)
 
 
+def resolve_pretrained_weights(model_variant: str, work_dir: Path | None = None) -> str:
+    """Prefer ``weights/<variant>.pt`` then ``<variant>.pt`` under *work_dir*."""
+    base = work_dir or Path.cwd()
+    name = f"{model_variant}.pt"
+    for candidate in (base / "weights" / name, base / name):
+        if candidate.is_file():
+            return str(candidate)
+    return name
+
+
 class TrainArtifacts:
     """Container for paths to training output artifacts."""
 
@@ -58,6 +68,7 @@ class YOLOTrainer:
         resume_training: bool = False,
         device: str | int | list[int] | None = None,
         workers: int | None = None,
+        use_amp: bool = True,
     ) -> TrainArtifacts:
         """Run a single YOLO training session.
 
@@ -80,7 +91,7 @@ class YOLOTrainer:
             model = YOLO(str(initial_weights))
             logger.info(f"Fine-tuning from checkpoint: {initial_weights}")
         else:
-            model_path = f"{model_variant}.pt"
+            model_path = resolve_pretrained_weights(model_variant, Path.cwd())
             model = YOLO(model_path)
             logger.info(f"Loading pretrained weights: {model_path}")
 
@@ -131,6 +142,7 @@ class YOLOTrainer:
             "perspective": hyperparams.perspective,
             "flipud": hyperparams.flipud,
             "fliplr": hyperparams.fliplr,
+            "amp": use_amp,
         }
 
         if resume_training:
@@ -144,7 +156,10 @@ class YOLOTrainer:
         logger.info(f"Augmentations: mosaic={hyperparams.mosaic}, mixup={hyperparams.mixup}")
 
         # Ultralytics AMP probe downloads yolo26n.pt unless present (not the training model).
-        ensure_amp_check_weights(Path.cwd())
+        if use_amp:
+            ensure_amp_check_weights(Path.cwd())
+        else:
+            logger.info("AMP disabled (use_amp=false) — skipping yolo26n.pt AMP compatibility check.")
 
         try:
             results = model.train(**train_args)

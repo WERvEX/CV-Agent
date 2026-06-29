@@ -63,6 +63,5 @@ for file in "${FILES[@]}"; do
   download "$(url_for "$file")" "$dest"
 done
 
-echo "==> done. Docker mount example:"
-echo "  -v \"$(realpath "$WEIGHTS_DIR")/yolo26n.pt:/app/yolo26n.pt:ro\" \\"
-echo "  -v \"$(realpath "$WEIGHTS_DIR")/yolo26m.pt:/app/yolo26m.pt:ro\""
+echo "==> done. Docker mount (recommended — mount directory, not single files):"
+echo "  -v \"$(realpath "$WEIGHTS_DIR"):/app/weights:ro\""

@@ -188,6 +188,7 @@ class TrainConfig(BaseModel):
     # Ultralytics device: auto (all visible GPUs), cpu, 0, or 0,1,2,3 (DDP)
     device: str = "auto"
     workers: int | None = None  # DataLoader workers; None = 8 on Linux, 0 on Windows
+    use_amp: bool = True  # false skips Ultralytics AMP check (no yolo26n.pt needed)
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
