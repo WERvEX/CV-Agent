@@ -222,10 +222,10 @@ mkdir -p runs datasets
 
 **Config:** defaults come from **`cv_agent.yaml`** (inside the image). Mount host config if you changed it: `-v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro"`.
 
-**Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs, `device: auto` in yaml uses all visible cards (DDP):
+**Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
 
 ```bash
-docker run -dit --gpus '"device=0,1,2,3"' --name cv_agent_train \
+docker run -dit --gpus '"device=0,1,2,3"' --shm-size=8g --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
   -v "$(pwd)/datasets:/app/datasets" \
   -v "$(pwd)/datasets:/datasets" \
@@ -234,6 +234,8 @@ docker run -dit --gpus '"device=0,1,2,3"' --name cv_agent_train \
   -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
   cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml
 ```
+
+If NCCL still fails, try `--ipc=host` instead of/in addition to `--shm-size=8g`.
 
 **Single GPU:**
 
@@ -256,6 +258,7 @@ docker run -dit --gpus '"device=0"' --name cv_agent_train \
 | `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
 | `-e CV_AGENT_LLM_KEY=...` | LLM key (preferred over putting secrets in local yaml) |
 | `--gpus '"device=0"'` | Expose one GPU on multi-GPU hosts |
+| `--shm-size=8g` | **Required for multi-GPU DDP** — avoids NCCL `No space left on device` on `/dev/shm` |
 
 > **Tip:** Paths in `dataset.yaml` must match **inside the container** (e.g. `path: /data/dataset`). See `dataset.yaml.example`.
 

@@ -7,7 +7,8 @@ max_rounds: 6          # 6 rounds × 50 epochs ≈ one full hyperparameter searc
 interaction_mode: ask # use --interaction auto on Docker/nohup, or override in cv_agent.local.yaml
 auto_prompt_seconds: 10
 
-# Multi-GPU: auto uses all GPUs visible inside the container (Docker: --gpus '"device=0,1,2,3"')
+# Multi-GPU: auto uses all GPUs visible in the container
+# Docker: --gpus '"device=0,1,2,3"' --shm-size=8g  (NCCL needs large /dev/shm)
 # Override: device: "0" (single) | "0,1,2,3" (explicit DDP) | cpu
 device: auto
 workers: 8             # DataLoader workers (Linux); use 0 on Windows if needed
