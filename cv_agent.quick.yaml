@@ -18,10 +18,10 @@ workers: 4
 data:
   data_yaml: coco128.yaml   # 128 images (~7 MB), auto-downloads
   min_images: 50
-  min_ann_per_class: 5
+  min_ann_per_class: 1      # COCO128 has rare classes with only 2–4 boxes; formal COCO uses 10
   min_pixel_area: 64
-  validate_brightness: true
-  validate_angles: true
+  validate_brightness: false  # skip slow checks on smoke runs
+  validate_angles: false
 
 initial_hyperparams:
   lr0: 0.01

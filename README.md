@@ -160,6 +160,7 @@ Docker (single GPU is enough for smoke test):
 docker run -dit --gpus '"device=0"' --name cv_agent_quick \
   -v "$(pwd)/runs:/app/runs" \
   -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/datasets:/datasets" \
   -v "$(pwd)/weights:/app/weights:ro" \
   -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
   cv_agent:latest --config cv_agent.quick.yaml run

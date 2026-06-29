@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from cv_agent.ui.console import log_info, log_success, log_warning
+from cv_agent.data.paths import candidate_datasets_dirs, resolve_dataset_root, resolve_datasets_dir
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -36,34 +36,29 @@ _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 
 def _set_ultralytics_datasets_dir(datasets_dir: Path) -> None:
+    datasets_dir = datasets_dir.resolve()
     datasets_dir.mkdir(parents=True, exist_ok=True)
     try:
         from ultralytics import settings as ul_settings
 
-        ul_settings.update({"datasets_dir": str(datasets_dir.resolve())})
+        ul_settings.update({"datasets_dir": str(datasets_dir)})
     except Exception:
         pass
+
+
+def _find_registry_yaml(dataset_name: str, datasets_dir: Path) -> Path | None:
+    """Locate a registry dataset YAML after Ultralytics download."""
+    name = dataset_name if dataset_name.endswith(".yaml") else f"{dataset_name}.yaml"
+    stem = Path(name).stem
+    for root in candidate_datasets_dirs(datasets_dir):
+        for candidate in (root / name, root / stem / name):
+            if candidate.is_file() and yaml_has_images(candidate):
+                return candidate.resolve()
+    return None
 
 
 def _resolve_dataset_root(yaml_path: Path, dataset_info: dict) -> Path:
-    path = dataset_info.get("path", "")
-    if not path:
-        return yaml_path.parent
-    p = Path(path)
-    if p.is_absolute():
-        return p
-    cand = yaml_path.parent / p
-    if cand.exists():
-        return cand
-    try:
-        from ultralytics.utils import SETTINGS
-
-        cand2 = Path(SETTINGS["datasets_dir"]) / p
-        if cand2.exists():
-            return cand2
-    except Exception:
-        pass
-    return cand
+    return resolve_dataset_root(yaml_path, dataset_info)
 
 
 def _split_image_count(dataset_info: dict, root: Path, split: str) -> int:
@@ -120,8 +115,13 @@ def _download_registry_dataset(datasets_dir: Path, dataset_name: str) -> Path | 
         log_info(f"Downloading {name} into {datasets_dir.resolve()} (may take a while for COCO) ...")
         data = check_det_dataset(name)
         yaml_path = data.get("yaml_file") if isinstance(data, dict) else None
-        if yaml_path and Path(yaml_path).exists():
-            return Path(yaml_path)
+        if yaml_path:
+            resolved = Path(yaml_path).resolve()
+            if resolved.is_file() and yaml_has_images(resolved):
+                return resolved
+        located = _find_registry_yaml(name, datasets_dir)
+        if located is not None:
+            return located
         logger.warning("check_det_dataset returned no usable yaml_file: %s", data)
         return None
     except Exception as e:
@@ -131,7 +131,7 @@ def _download_registry_dataset(datasets_dir: Path, dataset_name: str) -> Path | 
 
 def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> Path:
     """Return a dataset YAML path, downloading registry datasets when needed."""
-    target_dir = datasets_dir or DEFAULT_DATASETS_DIR
+    target_dir = resolve_datasets_dir(datasets_dir)
 
     if data_yaml is None:
         log_info(f"No dataset specified — bootstrapping {DEFAULT_BOOTSTRAP_DATASET}.")
@@ -146,10 +146,19 @@ def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> 
     registry = _registry_name_for(data_yaml)
 
     if data_yaml.exists() and yaml_has_images(data_yaml):
-        return data_yaml
+        if registry := _registry_name_for(data_yaml):
+            located = _find_registry_yaml(registry, target_dir)
+            if located is not None:
+                return located
+        return data_yaml.resolve()
 
     if data_yaml.exists() and not yaml_has_images(data_yaml):
         log_warning(f"Dataset YAML found but no images on disk: {data_yaml}")
+        # Bundled registry YAML (e.g. /app/coco128.yaml) — prefer downloaded copy under datasets_dir.
+        located = _find_registry_yaml(data_yaml.name, target_dir)
+        if located is not None:
+            log_success(f"Dataset ready: {located}")
+            return located
 
     download_name = registry or data_yaml.name
     if not download_name.endswith(".yaml"):
@@ -164,7 +173,7 @@ def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> 
             return resolved
 
     if data_yaml.exists():
-        return data_yaml
+        return data_yaml.resolve()
 
     raise FileNotFoundError(
         f"Could not resolve dataset {data_yaml}. Provide a valid --data-yaml or use "

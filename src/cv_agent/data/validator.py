@@ -15,6 +15,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from cv_agent.core.config import DataConfig
+from cv_agent.data.paths import resolve_dataset_root
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -94,40 +95,8 @@ class DatasetValidator:
     # ------------------------------------------------------------------
 
     def _dataset_root(self, dataset_info: dict) -> Path:
-        """Resolve the dataset root (the YAML ``path`` field).
-
-        Follows Ultralytics conventions: an absolute ``path`` is used as-is; a
-        relative ``path`` is resolved against (in order) the YAML's directory,
-        the Ultralytics ``datasets_dir`` (where auto-downloaded datasets like
-        COCO128 land), and finally the cwd. The first existing directory wins;
-        if none exist, the YAML-dir-relative candidate is returned so that
-        downstream checks report a clear "0 images" rather than crashing.
-        """
-        path = dataset_info.get("path", "")
-        if not path:
-            return self.config.data_yaml.parent
-
-        p = Path(path)
-        if p.is_absolute():
-            return p
-
-        yaml_dir = self.config.data_yaml.parent
-        cand = yaml_dir / path
-        if cand.exists():
-            return cand
-
-        # Ultralytics downloads datasets into SETTINGS['datasets_dir']; a bare
-        # name like "coco128" resolves there, not next to the YAML.
-        try:
-            from ultralytics.utils import SETTINGS
-            ds_dir = Path(SETTINGS["datasets_dir"])
-            cand2 = ds_dir / path
-            if cand2.exists():
-                return cand2
-        except Exception:
-            pass
-
-        return cand  # may not exist; callers handle gracefully
+        """Resolve the dataset root (the YAML ``path`` field)."""
+        return resolve_dataset_root(self.config.data_yaml, dataset_info)
 
     def _resolve_split_path(self, dataset_info: dict, split: str) -> Path | None:
         """Resolve the image directory for a train/val/test split.

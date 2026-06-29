@@ -41,4 +41,32 @@ def test_ensure_dataset_returns_existing_populated_yaml(tmp_path):
         yaml.dump({"path": str(root), "train": "images/train", "names": ["a"]}),
         encoding="utf-8",
     )
-    assert ensure_dataset(yaml_path, datasets_dir=tmp_path / "datasets") == yaml_path
+    assert ensure_dataset(yaml_path, datasets_dir=tmp_path / "datasets") == yaml_path.resolve()
+
+
+def test_ensure_dataset_prefers_downloaded_registry_yaml_over_bundled_spec(tmp_path, monkeypatch):
+    """Bundled coco128.yaml exists but images live under datasets_dir (Ultralytics layout)."""
+    bundled = tmp_path / "coco128.yaml"
+    bundled.write_text(
+        "path: coco128\ntrain: images/train2017\nval: images/train2017\nnames: [a]\n",
+        encoding="utf-8",
+    )
+    datasets_dir = tmp_path / "datasets"
+    root = datasets_dir / "coco128" / "images" / "train2017"
+    root.mkdir(parents=True)
+    (root / "a.jpg").write_bytes(b"x")
+    downloaded_yaml = datasets_dir / "coco128.yaml"
+    downloaded_yaml.write_text(
+        yaml.dump(
+            {
+                "path": "coco128",
+                "train": "images/train2017",
+                "val": "images/train2017",
+                "names": ["a"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    resolved = ensure_dataset(bundled, datasets_dir=datasets_dir)
+    assert resolved == downloaded_yaml.resolve()
