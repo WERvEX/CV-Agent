@@ -13,6 +13,7 @@ import yaml
 from ultralytics import YOLO
 
 from cv_agent.core.config import HyperParams
+from cv_agent.trainer.amp_weights import ensure_amp_check_weights
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -128,6 +129,9 @@ class YOLOTrainer:
 
         logger.info(f"Starting training with {epochs} epochs, batch={hyperparams.batch}, lr0={hyperparams.lr0}")
         logger.info(f"Augmentations: mosaic={hyperparams.mosaic}, mixup={hyperparams.mixup}")
+
+        # Ultralytics AMP probe downloads yolo26n.pt unless present (not the training model).
+        ensure_amp_check_weights(Path.cwd())
 
         try:
             results = model.train(**train_args)

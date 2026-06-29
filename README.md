@@ -134,6 +134,13 @@ SKIP_IMAGES=1 bash scripts/prefetch_coco.sh      # labels only (~168 MB), then i
 
 Files land in `./datasets/`; Docker mount `-v "$(pwd)/datasets:/app/datasets"` reuses them.
 
+**Model weights:** Ultralytics downloads pretrained `.pt` on first train. Prefetch on the host (includes `yolo26n.pt` for AMP checks — **not** your training model):
+
+```bash
+bash scripts/prefetch_weights.sh
+# Docker: also mount -v "$(pwd)/weights/yolo26n.pt:/app/yolo26n.pt:ro" etc.
+```
+
 **Quick smoke test** (COCO128, ~7 MB):
 
 ```bash

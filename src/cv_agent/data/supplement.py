@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from cv_agent.data.validator import ValidationIssue
+from cv_agent.interaction.types import SessionQuit
 from cv_agent.tracking.run_dir import save_supplement_script
 from cv_agent.ui.console import log_error, log_info, log_warning, print_validation_issues
 from cv_agent.utils.logging_setup import get_logger
