@@ -1,0 +1,106 @@
+# Quick functional experiment profile — smoke-test closed-loop without full COCO.
+# Usage:
+#   cv_agent --config cv_agent.quick.yaml run
+#   docker run ... -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
+#     cv_agent:latest --config cv_agent.quick.yaml run
+#
+# Bottleneck on full runs is usually the dataset (COCO ~118k images), not yolo26s.
+
+model_variant: yolo26n
+epochs_per_round: 5
+max_rounds: 3
+interaction_mode: auto
+auto_prompt_seconds: 10
+
+device: "0"          # single GPU smoke test; use auto + --gpus for multi-GPU
+workers: 4
+
+data:
+  data_yaml: coco128.yaml   # 128 images (~7 MB), auto-downloads
+  min_images: 50
+  min_ann_per_class: 5
+  min_pixel_area: 64
+  validate_brightness: true
+  validate_angles: true
+
+initial_hyperparams:
+  lr0: 0.01
+  lrf: 0.01
+  batch: 16
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 1.0
+  warmup_momentum: 0.8
+  box: 7.5
+  cls: 0.5
+  dfl: 1.5
+  mosaic: 1.0
+  mixup: 0.0
+  copy_paste: 0.0
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  degrees: 0.0
+  translate: 0.1
+  scale: 0.5
+  shear: 0.0
+  perspective: 0.0
+  flipud: 0.0
+  fliplr: 0.5
+
+optuna:
+  n_trials: 10
+  search_strategy: bayesian
+  yellow_strategy: random_walk
+  n_startup_trials: 3
+  pruner: none
+  random_walk_min_step_scale: 0.02
+  search_space:
+    lr0: [0.001, 0.01]
+    lrf: [0.001, 0.01]
+    batch: [8, 16, 32]
+    momentum: [0.8, 0.98]
+    weight_decay: [0.0, 0.001]
+    mosaic: [0.0, 1.0]
+    mixup: [0.0, 0.3]
+    copy_paste: [0.0, 0.2]
+    hsv_h: [0.0, 0.05]
+    hsv_s: [0.0, 1.0]
+    hsv_v: [0.0, 1.0]
+    degrees: [0.0, 15.0]
+    translate: [0.0, 0.2]
+    scale: [0.1, 0.9]
+    shear: [0.0, 5.0]
+    perspective: [0.0, 0.001]
+    flipud: [0.0, 0.5]
+    fliplr: [0.0, 1.0]
+
+llm:
+  api_base: https://api.deepseek.com
+  api_key: ""
+  model: deepseek-v4-flash
+  max_tokens: 4096
+  temperature: 0.3
+  max_calls_per_session: 10
+  guidance_enabled: true
+  guidance_fallback_regex: true
+
+mlflow_uri: http://localhost:5000
+experiment_name: cv_agent_quick
+output_root: runs
+
+checkpoints:
+  top_n: 3
+  auto_save_top: true
+  manual_save_dir: manual
+
+decision:
+  green_threshold_pct: 3.0
+  green_threshold_abs: null
+  red_threshold_pct: -5.0
+  red_threshold_abs: null
+  soft_red_threshold_pct: -3.0
+  accept_marginal_improvement: true
+  marginal_green_use_optuna: false
+  red_escalation_count: 3
+  yellow_resets_red_count: true

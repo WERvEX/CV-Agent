@@ -118,7 +118,7 @@ pip install -e ".[dev]"
 
 ### First run (full COCO)
 
-Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 10 rounds.
+Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 6 rounds.
 
 ```bash
 cv_agent run
@@ -141,13 +141,38 @@ bash scripts/prefetch_weights.sh
 # Docker: also mount -v "$(pwd)/weights/yolo26n.pt:/app/yolo26n.pt:ro" etc.
 ```
 
-**Quick smoke test** (COCO128, ~7 MB):
+**Quick functional test** (~minutes, not hours) — use bundled `cv_agent.quick.yaml`:
+
+| Profile | Dataset | Model | Epochs/round | Rounds | ~Train steps/epoch |
+|---------|---------|-------|--------------|--------|-------------------|
+| `cv_agent.quick.yaml` | COCO128 (128 img) | yolo26n | 5 | 3 | 8 |
+| `cv_agent.yaml` (default) | COCO (~118k img) | yolo26s | 50 | 6 | ~1849 |
+
+Full COCO is the main time cost; switching `yolo26s` → `yolo26n` only helps modestly.
+
+```bash
+cv_agent --config cv_agent.quick.yaml run
+```
+
+Docker (single GPU is enough for smoke test):
+
+```bash
+docker run -dit --gpus '"device=0"' --name cv_agent_quick \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/weights:/app/weights:ro" \
+  -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
+  cv_agent:latest --config cv_agent.quick.yaml run
+docker attach cv_agent_quick
+```
+
+Or override flags on the default config:
 
 ```bash
 cv_agent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
 ```
 
-Add `epochs_per_round: 3` in `cv_agent.local.yaml` for shorter smoke rounds (see example file).
+Add `epochs_per_round: 5` in `cv_agent.local.yaml` for shorter smoke rounds (see example file).
 
 ### Train on your dataset
 
