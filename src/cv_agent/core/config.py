@@ -179,12 +179,15 @@ class TrainConfig(BaseModel):
     """Top-level configuration aggregating all sub-systems."""
 
     data: DataConfig = Field(default_factory=DataConfig)
-    model_variant: str = "yolo26n"
-    epochs_per_round: int = 3
-    max_rounds: int = 10
+    model_variant: str = "yolo26s"
+    epochs_per_round: int = 50
+    max_rounds: int = 6
     interaction_mode: Literal["auto", "ask"] = "ask"
     auto_prompt_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     optimize_for_class: str | None = None
+    # Ultralytics device: auto (all visible GPUs), cpu, 0, or 0,1,2,3 (DDP)
+    device: str = "auto"
+    workers: int | None = None  # DataLoader workers; None = 8 on Linux, 0 on Windows
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)

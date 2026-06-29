@@ -144,6 +144,7 @@ class Evaluator:
         result: RoundResult,
         weights_path: Path,
         data_yaml: Path,
+        device: str | int | list[int] | None = None,
     ) -> RoundResult:
         """Run model.val() to attach per-class metrics and a confusion matrix.
 
@@ -157,11 +158,15 @@ class Evaluator:
         try:
             from ultralytics import YOLO
 
+            from cv_agent.trainer.device import resolve_device
+
+            val_device = resolve_device(device) if isinstance(device, str) or device is None else device
             logger.info(f"Running validation enrichment on {weights_path.name} ...")
             val_result = YOLO(str(weights_path)).val(
                 data=str(data_yaml),
                 plots=False,
                 verbose=False,
+                device=val_device,
             )
         except Exception as e:
             logger.warning(f"Validation enrichment failed: {e}")

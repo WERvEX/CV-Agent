@@ -215,43 +215,39 @@ On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacent
 git clone <your-repo-url>
 cd cv_agent
 
-# Build image
-docker build -t cv_agent:latest .
-
 # Build image (bundles cv_agent.yaml; local overrides are optional)
 docker build -t cv_agent:latest .
 mkdir -p runs datasets
 ```
 
-**Config:** defaults come from **`cv_agent.yaml`** (inside the image). **`cv_agent.local.yaml` is optional** — only create/mount it to override specific keys (usually the LLM API key). Do **not** mount a missing file path; Docker would create an empty **directory** and break startup.
+**Config:** defaults come from **`cv_agent.yaml`** (inside the image). Mount host config if you changed it: `-v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro"`.
 
-**Foreground run** (GPU 0 only, uses `cv_agent.yaml` defaults; `--interaction` goes **before** `run`):
-
-```bash
-docker run --rm -it --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
-```
-
-**With optional local overrides** (only if `cv_agent.local.yaml` exists as a **file** on the host):
+**Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs, `device: auto` in yaml uses all visible cards (DDP):
 
 ```bash
-docker run --rm -it --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
+docker run -dit --gpus '"device=0,1,2,3"' --name cv_agent_train \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/datasets:/datasets" \
+  -v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro" \
+  -v "$(pwd)/weights/yolo26n.pt:/app/yolo26n.pt:ro" \
+  -v "$(pwd)/weights/yolo26s.pt:/app/yolo26s.pt:ro" \
+  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
+  cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml
 ```
 
-**Detached background**:
+**Single GPU:**
 
 ```bash
-docker run -d --gpus '"device=0"' --name cv_agent_train -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" cv_agent:latest --interaction auto run
-
-# Monitor (container stdout + file log under runs/)
-docker logs -f cv_agent_train
-tail -f runs/exp_*/cv_agent.log
+docker run -dit --gpus '"device=0"' --name cv_agent_train \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/datasets:/datasets" \
+  -v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro" \
+  cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml --device 0
 ```
 
-**Resume** after container exit or host reboot:
-
-```bash
-docker run --rm -it --gpus '"device=0"' -v "$(pwd)/runs:/app/runs" -v "$(pwd)/datasets:/app/datasets" cv_agent:latest resume --run-dir runs/exp_<timestamp>
-```
+`device` in yaml: `auto` | `0` | `0,1,2,3` | `cpu`. CLI: `run --device 0,1,2,3`.
 
 | Mount / env | Purpose |
 |-------------|---------|
@@ -347,7 +343,8 @@ Commands:
 | Option | Description |
 |--------|-------------|
 | `--data-yaml PATH` | Dataset YAML (COCO128 bootstrap if omitted) |
-| `--model TEXT` | Model variant (`yolo26n`, `yolov8s`, `yolo11m`, …) |
+| `--model TEXT` | Model variant (`yolo26s`, `yolov8m`, …) |
+| `--device TEXT` | CUDA devices: `auto`, `0`, `0,1,2,3`, `cpu` |
 | `--max-rounds INT` | Override `max_rounds` |
 | `--optimize-for TEXT` | Class name to prioritize in reward |
 | `--start fresh\|resume\|from-checkpoint` | Startup mode (skips wizard when set) |
@@ -545,7 +542,9 @@ Settings load from **`cv_agent.yaml`** (tracked). If present, **`cv_agent.local.
 |-----|---------|-------------|
 | `model_variant` | `yolo26s` | Ultralytics model slug |
 | `epochs_per_round` | `50` | Epochs per closed-loop round |
-| `max_rounds` | `10` | Total rounds before stop |
+| `max_rounds` | `6` | Total rounds before stop |
+| `device` | `auto` | `auto` (all visible GPUs), `0`, `0,1,2,3`, or `cpu` |
+| `workers` | `8` (Linux) | DataLoader workers (`0` on Windows if unset) |
 | `interaction_mode` | `ask` | `ask` or `auto` |
 | `auto_prompt_seconds` | `10` | Auto mode countdown before approving a round |
 | `optimize_for_class` | `null` | Class name for weighted reward |

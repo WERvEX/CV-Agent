@@ -301,6 +301,8 @@ def cli(ctx: click.Context, config: Path, interaction: str | None) -> None:
               help="Run directory for --start resume.")
 @click.option("--checkpoint-id", type=str, default=None,
               help="Checkpoint id for --start from-checkpoint (see list-checkpoints).")
+@click.option("--device", type=str, default=None,
+              help="CUDA device(s): auto, cpu, 0, or 0,1,2,3 (DDP). Overrides config.")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -311,6 +313,7 @@ def run(
     start: str | None,
     run_dir: Path | None,
     checkpoint_id: str | None,
+    device: str | None,
 ) -> None:
     """Start automated closed-loop training.
 
@@ -336,6 +339,8 @@ def run(
     overrides["data"] = _build_data_yaml_override(resolved_data_yaml)
     if model:
         overrides["model_variant"] = model
+    if device:
+        overrides["device"] = device
 
     base_config = _load_config(ctx.obj["config_path"], overrides)
     interaction_mode = _prompt_interaction_mode(

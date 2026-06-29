@@ -14,6 +14,7 @@ from ultralytics import YOLO
 
 from cv_agent.core.config import HyperParams
 from cv_agent.trainer.amp_weights import ensure_amp_check_weights
+from cv_agent.trainer.device import resolve_device, resolve_workers
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +56,8 @@ class YOLOTrainer:
         run_dir: Path,
         initial_weights: Path | None = None,
         resume_training: bool = False,
+        device: str | int | list[int] | None = None,
+        workers: int | None = None,
     ) -> TrainArtifacts:
         """Run a single YOLO training session.
 
@@ -82,13 +85,20 @@ class YOLOTrainer:
             logger.info(f"Loading pretrained weights: {model_path}")
 
         # Build training arguments from HyperParams
+        if device is None or isinstance(device, str):
+            train_device = resolve_device(device)
+        else:
+            train_device = device
+        train_workers = resolve_workers(workers)
+
         train_args = {
             "data": str(data_yaml),
             "epochs": epochs,
             "project": str(run_dir.parent),  # e.g., "runs"
             "name": run_dir.name,            # e.g., "exp_20260122_143052"
             "exist_ok": True,
-            "workers": 0,  # Windows DataLoader stability (spawn-based workers)
+            "device": train_device,
+            "workers": train_workers,
             # Disable Ultralytics' built-in MLflow autolog — cv_agent manages
             # its own MLflow tracking and the file-store warning is noisy.
             "plots": False,
@@ -127,7 +137,10 @@ class YOLOTrainer:
             train_args["resume"] = True
             logger.info("Ultralytics resume=True — continuing interrupted training run.")
 
-        logger.info(f"Starting training with {epochs} epochs, batch={hyperparams.batch}, lr0={hyperparams.lr0}")
+        logger.info(
+            f"Starting training with {epochs} epochs, batch={hyperparams.batch}, "
+            f"lr0={hyperparams.lr0}, device={train_device}, workers={train_workers}"
+        )
         logger.info(f"Augmentations: mosaic={hyperparams.mosaic}, mixup={hyperparams.mixup}")
 
         # Ultralytics AMP probe downloads yolo26n.pt unless present (not the training model).
@@ -205,6 +218,7 @@ class YOLOTrainer:
         weights_path: Path,
         data_yaml: Path,
         run_dir: Path,
+        device: str | int | list[int] | None = None,
     ) -> dict[str, Any]:
         """Run standalone validation on a trained model.
 
@@ -217,6 +231,7 @@ class YOLOTrainer:
             Validation metrics dict from Ultralytics.
         """
         model = YOLO(str(weights_path))
+        val_device = resolve_device(device) if device is None or isinstance(device, str) else device
         metrics = model.val(
             data=str(data_yaml),
             project=str(run_dir.parent),
@@ -224,5 +239,6 @@ class YOLOTrainer:
             exist_ok=True,
             plots=False,
             verbose=False,
+            device=val_device,
         )
         return metrics

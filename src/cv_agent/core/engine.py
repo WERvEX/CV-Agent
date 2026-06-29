@@ -139,7 +139,8 @@ class TrainingEngine:
         log_info(f"Run directory: {self._run_dir}")
         log_info(
             f"Model={config.model_variant}, epochs/round={config.epochs_per_round}, "
-            f"max_rounds={config.max_rounds}, interaction={config.interaction_mode}"
+            f"max_rounds={config.max_rounds}, interaction={config.interaction_mode}, "
+            f"device={config.device}"
         )
         if self._fork_weights:
             log_info(f"Initial weights: {self._fork_weights}")
@@ -365,6 +366,8 @@ class TrainingEngine:
                 epochs=self._config.epochs_per_round,
                 run_dir=self._run_dir,
                 initial_weights=initial_weights,
+                device=self._config.device,
+                workers=self._config.workers,
             )
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE
@@ -408,6 +411,7 @@ class TrainingEngine:
             round_result,
             weights_path=weights_for_val,
             data_yaml=config.data.data_yaml,
+            device=config.device,
         )
 
         comparison = self._evaluator.compare(round_result, self._history)
