@@ -53,8 +53,20 @@ download() {
 mkdir -p "$WEIGHTS_DIR"
 echo "==> weights dir: $WEIGHTS_DIR"
 
+# Docker creates empty directories when mounting missing host files — remove before download.
+for shadow in "$WEIGHTS_DIR"/*.pt "$ROOT"/*.pt; do
+  if [[ -d "$shadow" ]]; then
+    echo "==> removing shadow directory (bad prior Docker mount): $shadow"
+    rm -rf "$shadow"
+  fi
+done
+
 for file in "${FILES[@]}"; do
   dest="$WEIGHTS_DIR/$file"
+  if [[ -d "$dest" ]]; then
+    echo "==> removing shadow directory: $dest"
+    rm -rf "$dest"
+  fi
   if [[ -f "$dest" ]] && [[ "$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest")" -gt 1000000 ]]; then
     echo "==> skip $file (already present)"
     continue
