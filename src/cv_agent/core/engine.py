@@ -44,10 +44,12 @@ from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
     load_latest_decision_log,
+    load_strategy_memory,
     restore_session_state,
     save_artifacts,
     save_data_gap_report,
     save_session_state,
+    save_strategy_memory,
     snapshot_best_checkpoint,
 )
 from cv_agent.trainer.evaluator import Evaluator, RoundResult
@@ -102,6 +104,9 @@ class TrainingEngine:
         self._best_round: int = 0
         self._current_params: HyperParams | None = None
         self._decision_log: list[dict[str, Any]] = []
+        self._strategy_log: list[dict[str, Any]] = []
+        self._strategy_memory = None
+        self._active_strategy_patch = None
         self._llm_context_accumulator: str = ""
         self._checkpoint_manager: CheckpointManager | None = None
         self._fork_weights: Path | None = None
@@ -227,6 +232,13 @@ class TrainingEngine:
         optuna_count = session.get("optuna_trial_count")
         if optuna_count is not None and self._optuna is not None:
             self._optuna.set_trial_count(int(optuna_count))
+
+        if config.strategy.memory_enabled:
+            from cv_agent.decision.strategy_memory import StrategyMemory
+
+            memory_data = load_strategy_memory(run_dir)
+            if memory_data:
+                self._strategy_memory = StrategyMemory(**memory_data)
 
         self._mlflow.start_session(run_dir.name)
 
@@ -496,6 +508,9 @@ class TrainingEngine:
             comparison=comparison,
             current_params=self._current_params,
         )
+        strategy_patch = self._plan_strategy(decision.to_dict())
+        if strategy_patch is not None:
+            decision.metadata["strategy_patch"] = strategy_patch.model_dump()
 
         checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
 
@@ -771,6 +786,37 @@ class TrainingEngine:
         self._optuna.abandon_pending()
         return decision.next_hyperparams, False
 
+    def _plan_strategy(self, decision_summary: dict[str, Any]):
+        """Plan and apply strategy constraints for the next Optuna proposal."""
+        if not self._config.strategy.enabled:
+            return None
+        if self._round_num % self._config.strategy.planner_cadence != 0:
+            return self._active_strategy_patch
+
+        round_result = getattr(self, "_last_round_result", None)
+        metrics = round_result.metrics if round_result is not None else {}
+        memory = self._strategy_memory.model_dump() if self._strategy_memory is not None else {}
+        history = [
+            {"round": result.round_num, "score": result.score, "metrics": result.metrics}
+            for result in self._history[-10:]
+        ]
+        patch = self._llm_advisor.plan_strategy(
+            round_num=self._round_num,
+            decision_summary=decision_summary,
+            metrics=metrics,
+            history=history,
+            memory=memory,
+            base_search_space=self._config.optuna.search_space.model_dump(),
+        )
+        if patch.confidence < self._config.strategy.min_confidence:
+            return self._active_strategy_patch
+
+        self._active_strategy_patch = patch
+        if self._optuna is not None:
+            self._optuna.set_strategy_patch(patch)
+        self._strategy_log.append(patch.model_dump())
+        return patch
+
     def _handle_green(self, decision: Decision, round_result: RoundResult) -> None:
         """Green: commit checkpoint, update best, reset red counter."""
         log_success(f"GREEN — {decision.reason}")
@@ -1034,6 +1080,8 @@ class TrainingEngine:
                 "optuna_trial_count": self._optuna.trial_count if self._optuna else 0,
             },
         )
+        if self._config.strategy.memory_enabled and self._strategy_memory is not None:
+            save_strategy_memory(self._run_dir, self._strategy_memory.model_dump())
 
     def _set_interaction_mode(self, mode: str) -> None:
         """Hot-swap the interaction handler for the remainder of the session."""
@@ -1100,6 +1148,14 @@ class TrainingEngine:
 
         # LLM advisor
         self._llm_advisor = LLMAdvisor(config=config.llm)
+
+        # Strategy memory
+        if config.strategy.memory_enabled:
+            from cv_agent.decision.strategy_memory import StrategyMemory
+
+            self._strategy_memory = StrategyMemory(max_items=config.strategy.max_memory_items)
+        else:
+            self._strategy_memory = None
 
         # MLflow manager
         self._mlflow = MLflowManager(
