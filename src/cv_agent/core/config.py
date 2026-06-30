@@ -182,6 +182,7 @@ class TrainConfig(BaseModel):
     model_variant: str = "yolo26s"
     epochs_per_round: int = 50
     max_rounds: int = 6
+    max_train_failures: int = Field(default=3, ge=1, le=50)
     interaction_mode: Literal["auto", "ask"] = "ask"
     auto_prompt_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     optimize_for_class: str | None = None

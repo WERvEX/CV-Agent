@@ -95,6 +95,7 @@ class TrainingEngine:
         # State tracking
         self._red_tracker = RedCountTracker()
         self._round_num: int = 0
+        self._train_failures: int = 0
         self._history: list[RoundResult] = []
         self._best_checkpoint: Path | None = None
         self._best_score: float = 0.0
@@ -113,6 +114,7 @@ class TrainingEngine:
         """Execute a new closed-loop training session from pretrained weights."""
         self._fork_weights = None
         self._round_num = 0
+        self._train_failures = 0
         ts_dir = create_run_dir(config.output_root)
         self._begin_session(config, ts_dir)
 
@@ -131,6 +133,7 @@ class TrainingEngine:
     def _begin_session(self, config: TrainConfig, run_dir: Path) -> None:
         """Shared setup for fresh and forked training sessions."""
         self._config = config
+        self._train_failures = 0
         log_file = run_dir / "cv_agent.log"
         setup_logging(log_file=log_file)
         self._run_dir = run_dir
@@ -199,6 +202,7 @@ class TrainingEngine:
 
         self._setup_subsystems(config)
         self._decision_log = load_latest_decision_log(run_dir)
+        self._train_failures = 0
         self._round_num = int(session["round_num"])
         self._best_score = float(session.get("best_score", 0.0))
         self._best_round = int(session.get("best_round", self._round_num))
@@ -371,9 +375,11 @@ class TrainingEngine:
                 use_amp=self._config.use_amp,
             )
             self._round_num = attempt_round
+            self._train_failures = 0
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE
         except Exception as e:
+            self._train_failures += 1
             log_error(f"Training failed in round {attempt_round}: {e}")
             logger.exception("Training error traceback:")
             # Auto-rollback to best checkpoint if available
@@ -387,8 +393,17 @@ class TrainingEngine:
                 "reason": str(e),
             })
             self._mlflow.end_round()
-            # Don't count this as a real round, just retry
-            self._state = TrainingLoopState.TRAIN
+            # Don't count this as a real round, but stop deterministic crash loops.
+            if self._train_failures >= self._config.max_train_failures:
+                log_error(
+                    "Training failed "
+                    f"{self._train_failures} consecutive time(s); "
+                    f"reached max_train_failures={self._config.max_train_failures}. "
+                    "Stopping training loop."
+                )
+                self._state = TrainingLoopState.DONE
+            else:
+                self._state = TrainingLoopState.TRAIN
 
     def _do_evaluate(self) -> None:
         """EVALUATE: Extract metrics, compute reward, compare with history."""
