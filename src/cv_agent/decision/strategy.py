@@ -30,7 +30,10 @@ class StrategyPatch(BaseModel):
     @classmethod
     def validate_freeze_fields(cls, value: set[str]) -> set[str]:
         valid_fields = set(OptunaSearchSpace.model_fields)
-        return {field for field in value if field in valid_fields}
+        invalid_fields = sorted(field for field in value if field not in valid_fields)
+        if invalid_fields:
+            raise ValueError(f"Invalid freeze field(s): {', '.join(invalid_fields)}")
+        return value
 
     def apply_to_search_space(self, base: OptunaSearchSpace) -> OptunaSearchSpace:
         data = base.model_dump()

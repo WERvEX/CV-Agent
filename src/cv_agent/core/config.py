@@ -114,13 +114,12 @@ class ObjectiveWeights(BaseModel):
 
     def normalized(self) -> "ObjectiveWeights":
         data = self.model_dump()
-        selected_fields = self.model_fields_set or data.keys()
         normalized_data = {key: 0.0 for key in data}
-        total = sum(float(data[key]) for key in selected_fields)
+        total = sum(float(value) for value in data.values())
         if total <= 0:
             return ObjectiveWeights()
-        for key in selected_fields:
-            normalized_data[key] = float(data[key]) / total
+        for key, value in data.items():
+            normalized_data[key] = float(value) / total
         return ObjectiveWeights(**normalized_data)
 
 
