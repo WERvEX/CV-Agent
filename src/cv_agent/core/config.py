@@ -102,6 +102,38 @@ class OptunaSearchSpace(BaseModel):
 # Sub-system configuration models
 # ---------------------------------------------------------------------------
 
+class ObjectiveWeights(BaseModel):
+    """Weights used to combine evaluation metrics into a strategy objective."""
+
+    map50_95: float = Field(default=0.45, ge=0.0)
+    map50: float = Field(default=0.15, ge=0.0)
+    recall: float = Field(default=0.20, ge=0.0)
+    precision: float = Field(default=0.10, ge=0.0)
+    overfit_penalty: float = Field(default=0.10, ge=0.0)
+    cost_penalty: float = Field(default=0.0, ge=0.0)
+
+    def normalized(self) -> "ObjectiveWeights":
+        data = self.model_dump()
+        selected_fields = self.model_fields_set or data.keys()
+        normalized_data = {key: 0.0 for key in data}
+        total = sum(float(data[key]) for key in selected_fields)
+        if total <= 0:
+            return ObjectiveWeights()
+        for key in selected_fields:
+            normalized_data[key] = float(data[key]) / total
+        return ObjectiveWeights(**normalized_data)
+
+
+class StrategyConfig(BaseModel):
+    """AI strategy planner configuration."""
+
+    enabled: bool = True
+    planner_cadence: int = Field(default=1, ge=1)
+    min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
+    memory_enabled: bool = True
+    max_memory_items: int = Field(default=50, ge=1, le=500)
+    objective_weights: ObjectiveWeights = Field(default_factory=ObjectiveWeights)
+
 class OptunaConfig(BaseModel):
     """Optuna optimizer configuration."""
 
@@ -193,6 +225,7 @@ class TrainConfig(BaseModel):
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mlflow_uri: str = "http://localhost:5000"
     experiment_name: str = "cv_agent"
