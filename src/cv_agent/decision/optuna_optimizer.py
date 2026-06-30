@@ -12,6 +12,7 @@ import random
 from pathlib import Path
 
 from cv_agent.core.config import HyperParams, OptunaConfig
+from cv_agent.decision.strategy import StrategyPatch
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -23,6 +24,9 @@ class OptunaOptimizer:
     def __init__(self, config: OptunaConfig, study_db: Path | None = None) -> None:
         self.config = config
         self.search_space = config.search_space
+        self._strategy_patch: StrategyPatch | None = None
+        self._effective_search_space = self.search_space
+        self._frozen_fields: set[str] = set()
         self.study_db = str(study_db) if study_db else "optuna_study.db"
         self._study = None
         self._pending_trial = None
@@ -76,6 +80,16 @@ class OptunaOptimizer:
     def set_trial_count(self, count: int) -> None:
         """Restore in-memory trial budget counter (e.g. on session resume)."""
         self._trial_count = max(0, count)
+
+    def set_strategy_patch(self, patch: StrategyPatch | None) -> None:
+        """Apply or clear strategy constraints for future Optuna proposals."""
+        self._strategy_patch = patch
+        self._effective_search_space = (
+            patch.apply_to_search_space(self.search_space)
+            if patch is not None
+            else self.search_space
+        )
+        self._frozen_fields = set(patch.freeze) if patch is not None else set()
 
     def _sync_trial_count_from_study(self) -> None:
         if self._study is None:
@@ -185,6 +199,9 @@ class OptunaOptimizer:
         trial = self._study.ask()
         self._pending_trial = trial
         params_dict = self._trial_to_params(trial)
+        for field in self._frozen_fields:
+            if hasattr(current_params, field):
+                params_dict[field] = getattr(current_params, field)
         params = HyperParams(**params_dict)
         self._pending_params = params
         self._trial_count += 1
@@ -196,7 +213,7 @@ class OptunaOptimizer:
         return params, True
 
     def _trial_to_params(self, trial) -> dict:
-        ss = self.search_space
+        ss = self._effective_search_space
 
         def suggest_float_range(name: str, bounds: tuple[float, float]) -> float:
             return trial.suggest_float(name, bounds[0], bounds[1])
