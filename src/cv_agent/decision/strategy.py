@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from cv_agent.core.config import ObjectiveWeights, OptunaSearchSpace
 
 
-class StrategyPhase(StrEnum):
+class StrategyPhase(str, Enum):
     EXPLORATION = "exploration"
     EXPLOITATION = "exploitation"
     RECOVERY = "recovery"

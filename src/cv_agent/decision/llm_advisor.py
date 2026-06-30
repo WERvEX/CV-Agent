@@ -374,7 +374,7 @@ class LLMAdvisor:
                         ),
                         freeze=set(data.get("freeze") or []),
                         objective_weights=(
-                            ObjectiveWeights(**data["objective_weights"])
+                            ObjectiveWeights(**data["objective_weights"]).normalized()
                             if isinstance(data.get("objective_weights"), dict)
                             else None
                         ),
@@ -447,12 +447,31 @@ class LLMAdvisor:
 
     @staticmethod
     def _parse_search_space_patch(raw: Any) -> dict[str, tuple[float, float]]:
-        if not isinstance(raw, dict):
+        if raw is None:
             return {}
+        if not isinstance(raw, dict):
+            raise ValueError("search_space_patch must be an object")
+
+        base_space = OptunaSearchSpace()
+        numeric_interval_fields = {
+            field_name
+            for field_name in OptunaSearchSpace.model_fields
+            if isinstance(getattr(base_space, field_name), tuple)
+            and len(getattr(base_space, field_name)) == 2
+        }
         patch: dict[str, tuple[float, float]] = {}
         for key, value in raw.items():
-            if isinstance(value, (list, tuple)) and len(value) == 2:
-                patch[str(key)] = (float(value[0]), float(value[1]))
+            key = str(key)
+            if key not in numeric_interval_fields:
+                raise ValueError(f"Invalid search_space_patch field: {key}")
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError(f"Malformed search_space_patch interval for {key}")
+
+            low = float(value[0])
+            high = float(value[1])
+            if low > high:
+                raise ValueError(f"Invalid search_space_patch interval for {key}: low > high")
+            patch[key] = (low, high)
         return patch
 
     def _llm_analyze_cm(
@@ -715,6 +734,9 @@ class LLMAdvisor:
             return None
 
         for attempt in range(3):
+            if self._call_count >= self.config.max_calls_per_session:
+                logger.warning(f"LLM call limit reached ({self.config.max_calls_per_session}). Using fallback.")
+                return None
             try:
                 self._call_count += 1
                 response = self._client.chat.completions.create(
