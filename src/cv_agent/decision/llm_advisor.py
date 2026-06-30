@@ -16,10 +16,17 @@ from typing import Any
 
 import numpy as np
 from openai import OpenAI
+from pydantic import ValidationError
 
-from cv_agent.core.config import HyperParams, LLMConfig, OptunaSearchSpace
+from cv_agent.core.config import (
+    HyperParams,
+    LLMConfig,
+    ObjectiveWeights,
+    OptunaSearchSpace,
+)
 from cv_agent.data.gap_report import DataGapReport, DataSource, ProblemClass, build_data_gap_report
 from cv_agent.decision.guidance import GuidanceConstraints
+from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -124,6 +131,55 @@ Rules:
 - batch must be one of the search_space batch choices
 - set replace_proposal true only if user explicitly wants to ignore the proposed params entirely
 - prefer multipliers (e.g. 0.5 for half) over absolute values when user says relative changes
+"""
+
+STRATEGY_PROMPT = """You are a computer vision training strategist.
+
+You do not output exact hyperparameter values. You output bounded strategy patches
+that constrain Optuna and adjust objective weighting. Optuna will choose exact
+hyperparameter values inside the validated bounds.
+
+Return JSON only:
+{{
+  "phase": "exploration | exploitation | recovery | data_gap | stability_check",
+  "reason": "brief factual reason",
+  "search_space_patch": {{"lr0": [low, high], "mosaic": [low, high]}},
+  "freeze": ["batch"],
+  "objective_weights": {{
+    "map50_95": 0.45,
+    "map50": 0.15,
+    "recall": 0.20,
+    "precision": 0.10,
+    "overfit_penalty": 0.10,
+    "cost_penalty": 0.0
+  }},
+  "max_trials_for_phase": 5,
+  "confidence": 0.0
+}}
+
+Rules:
+- Do not set exact hyperparameter values.
+- Only use bounded search-space intervals for tunable numeric fields.
+- Only freeze valid Optuna search-space fields.
+- Prefer conservative bounds after red decisions or unstable rounds.
+
+Round number:
+{round_num}
+
+Decision summary:
+{decision_summary}
+
+Metrics:
+{metrics}
+
+History:
+{history}
+
+Strategy memory:
+{memory}
+
+Base search space:
+{base_search_space}
 """
 
 GAP_REPORT_PROMPT = """You are a computer vision data strategist. A YOLO object detection model has
@@ -282,6 +338,122 @@ class LLMAdvisor:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as e:
             logger.warning(f"Failed to parse LLM guidance response: {e}")
             return None
+
+    def plan_strategy(
+        self,
+        round_num: int,
+        decision_summary: dict[str, Any],
+        metrics: dict[str, float],
+        history: list[dict[str, Any]],
+        memory: dict[str, Any],
+        base_search_space: dict[str, Any],
+    ) -> StrategyPatch:
+        """Plan a bounded strategy patch for the next optimization phase."""
+        if self._client is not None and self._call_count < self.config.max_calls_per_session:
+            prompt = STRATEGY_PROMPT.format(
+                round_num=round_num,
+                decision_summary=json.dumps(decision_summary, indent=2, default=str),
+                metrics=json.dumps(metrics, indent=2, default=str),
+                history=json.dumps(history[-10:], indent=2, default=str),
+                memory=json.dumps(memory, indent=2, default=str),
+                base_search_space=json.dumps(base_search_space, indent=2, default=str),
+            )
+            try:
+                response = self._call_llm(prompt)
+            except Exception as e:
+                logger.warning(f"Strategy planner LLM call failed: {e}")
+                response = None
+            if response is not None:
+                try:
+                    data = json.loads(response)
+                    return StrategyPatch(
+                        phase=StrategyPhase(data.get("phase", "exploration")),
+                        reason=str(data.get("reason") or ""),
+                        search_space_patch=self._parse_search_space_patch(
+                            data.get("search_space_patch")
+                        ),
+                        freeze=set(data.get("freeze") or []),
+                        objective_weights=(
+                            ObjectiveWeights(**data["objective_weights"])
+                            if isinstance(data.get("objective_weights"), dict)
+                            else None
+                        ),
+                        max_trials_for_phase=data.get("max_trials_for_phase"),
+                        confidence=float(data.get("confidence", 0.5)),
+                        metadata={"source": "llm", "round": round_num},
+                    )
+                except (
+                    json.JSONDecodeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    AttributeError,
+                    ValidationError,
+                ) as e:
+                    logger.warning(f"Failed to parse strategy planner response: {e}")
+
+        return self._heuristic_plan_strategy(round_num, decision_summary, metrics)
+
+    def _heuristic_plan_strategy(
+        self,
+        round_num: int,
+        decision_summary: dict[str, Any],
+        metrics: dict[str, float],
+    ) -> StrategyPatch:
+        """Rule-based strategy planner used when the LLM is unavailable."""
+        color = str(decision_summary.get("color", "")).lower()
+        recall = float(metrics.get("recall", metrics.get("metrics/recall(B)", 0.0)) or 0.0)
+
+        if color == "red":
+            return StrategyPatch(
+                phase=StrategyPhase.RECOVERY,
+                reason="red decision triggered conservative recovery search",
+                search_space_patch={"lr0": (0.001, 0.004), "mosaic": (0.0, 0.5)},
+                freeze={"batch"},
+                objective_weights=ObjectiveWeights(
+                    map50_95=0.20,
+                    map50=0.10,
+                    recall=0.35,
+                    precision=0.10,
+                    overfit_penalty=0.25,
+                    cost_penalty=0.0,
+                ).normalized(),
+                confidence=0.6,
+                metadata={"source": "heuristic", "round": round_num},
+            )
+
+        if recall < 0.35:
+            return StrategyPatch(
+                phase=StrategyPhase.DATA_GAP,
+                reason="low recall suggests data or class coverage gap",
+                objective_weights=ObjectiveWeights(
+                    map50_95=0.25,
+                    map50=0.10,
+                    recall=0.45,
+                    precision=0.10,
+                    overfit_penalty=0.10,
+                    cost_penalty=0.0,
+                ).normalized(),
+                confidence=0.55,
+                metadata={"source": "heuristic", "round": round_num},
+            )
+
+        return StrategyPatch(
+            phase=StrategyPhase.EXPLORATION,
+            reason="no strong failure pattern; continue broad search",
+            confidence=0.5,
+            metadata={"source": "heuristic", "round": round_num},
+        )
+
+    @staticmethod
+    def _parse_search_space_patch(raw: Any) -> dict[str, tuple[float, float]]:
+        if not isinstance(raw, dict):
+            return {}
+        patch: dict[str, tuple[float, float]] = {}
+        for key, value in raw.items():
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                patch[str(key)] = (float(value[0]), float(value[1]))
+        return patch
 
     def _llm_analyze_cm(
         self,
