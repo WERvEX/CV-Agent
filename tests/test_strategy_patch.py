@@ -58,3 +58,24 @@ def test_strategy_patch_accepts_valid_freeze_field():
     patch = StrategyPatch(freeze={"mosaic"})
 
     assert patch.freeze == {"mosaic"}
+
+
+def test_strategy_patch_coerces_search_space_patch_list_to_tuple():
+    patch = StrategyPatch(search_space_patch={"lr0": [0.001, 0.002]})
+
+    assert patch.search_space_patch == {"lr0": (0.001, 0.002)}
+
+
+def test_strategy_patch_rejects_invalid_search_space_patch_key():
+    with pytest.raises(ValueError, match="not_a_field"):
+        StrategyPatch(search_space_patch={"not_a_field": (0.1, 0.2)})
+
+
+def test_strategy_patch_rejects_non_numeric_search_space_patch_field():
+    with pytest.raises(ValueError, match="batch"):
+        StrategyPatch(search_space_patch={"batch": (8, 16)})
+
+
+def test_strategy_patch_rejects_inverted_search_space_patch_interval():
+    with pytest.raises(ValueError, match="lr0"):
+        StrategyPatch(search_space_patch={"lr0": (0.01, 0.001)})

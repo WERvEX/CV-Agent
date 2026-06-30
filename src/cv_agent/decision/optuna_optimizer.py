@@ -198,10 +198,7 @@ class OptunaOptimizer:
         self._init_study()
         trial = self._study.ask()
         self._pending_trial = trial
-        params_dict = self._trial_to_params(trial)
-        for field in self._frozen_fields:
-            if hasattr(current_params, field):
-                params_dict[field] = getattr(current_params, field)
+        params_dict = self._trial_to_params(trial, current_params)
         params = HyperParams(**params_dict)
         self._pending_params = params
         self._trial_count += 1
@@ -212,13 +209,18 @@ class OptunaOptimizer:
         )
         return params, True
 
-    def _trial_to_params(self, trial) -> dict:
+    def _trial_to_params(self, trial, current_params: HyperParams | None = None) -> dict:
         ss = self._effective_search_space
+        current = current_params.model_dump() if current_params is not None else {}
 
         def suggest_float_range(name: str, bounds: tuple[float, float]) -> float:
+            if name in self._frozen_fields and name in current:
+                return current[name]
             return trial.suggest_float(name, bounds[0], bounds[1])
 
         def suggest_categorical_int(name: str, choices: list[int]) -> int:
+            if name in self._frozen_fields and name in current:
+                return current[name]
             return trial.suggest_categorical(name, choices)
 
         return {
@@ -243,7 +245,7 @@ class OptunaOptimizer:
         }
 
     def _neighbor_batch(self, current_batch: int) -> int:
-        choices = sorted(self.search_space.batch)
+        choices = sorted(self._effective_search_space.batch)
         if not choices:
             return current_batch
         if current_batch not in choices:
@@ -259,7 +261,7 @@ class OptunaOptimizer:
     def _propose_random_walk(self, current_params: HyperParams) -> HyperParams:
         min_scale = self.config.random_walk_min_step_scale
         self._rw_step_scale = max(self._rw_step_scale * 0.95, min_scale)
-        ss = self.search_space
+        ss = self._effective_search_space
         current = current_params.model_dump()
         perturbed: dict = {}
 
@@ -282,7 +284,7 @@ class OptunaOptimizer:
             f"Random walk proposal (step_scale={self._rw_step_scale:.4f}): "
             f"lr0={perturbed['lr0']:.5f}, mosaic={perturbed['mosaic']:.3f}"
         )
-        return HyperParams(**perturbed)
+        return self._apply_local_constraints(HyperParams(**perturbed), current_params)
 
     def _propose_simulated_annealing(
         self,
@@ -319,10 +321,10 @@ class OptunaOptimizer:
             f"Simulated annealing: T={self._sa_temperature:.4f}, "
             f"best_score={self._sa_best_score:.4f}, accepted={accepted}"
         )
-        return result
+        return self._apply_local_constraints(result, current_params)
 
     def _random_neighbor(self, params: HyperParams) -> HyperParams:
-        ss = self.search_space
+        ss = self._effective_search_space
         current = params.model_dump()
         neighbor: dict = {}
 
@@ -342,6 +344,26 @@ class OptunaOptimizer:
             neighbor[key] = max(low, min(high, new_val))
 
         return HyperParams(**neighbor)
+
+    def _apply_local_constraints(
+        self,
+        candidate: HyperParams,
+        current_params: HyperParams,
+    ) -> HyperParams:
+        data = candidate.model_dump()
+        current = current_params.model_dump()
+
+        for key, value in list(data.items()):
+            bounds = getattr(self._effective_search_space, key, None)
+            if isinstance(bounds, tuple) and len(bounds) == 2:
+                low, high = bounds
+                data[key] = max(low, min(high, value))
+
+        for field in self._frozen_fields:
+            if field in current:
+                data[field] = current[field]
+
+        return HyperParams(**data)
 
     def _report_result(self, params: HyperParams, score: float) -> None:
         """Backward-compatible alias."""

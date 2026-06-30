@@ -35,6 +35,45 @@ class StrategyPatch(BaseModel):
             raise ValueError(f"Invalid freeze field(s): {', '.join(invalid_fields)}")
         return value
 
+    @field_validator("search_space_patch")
+    @classmethod
+    def validate_search_space_patch(
+        cls,
+        value: dict[str, tuple[float, float]],
+    ) -> dict[str, tuple[float, float]]:
+        base_fields = OptunaSearchSpace.model_fields
+        invalid_fields: list[str] = []
+        non_numeric_fields: list[str] = []
+        inverted_fields: list[str] = []
+
+        for key, bounds in value.items():
+            if key not in base_fields:
+                invalid_fields.append(key)
+                continue
+
+            default = base_fields[key].default
+            if not isinstance(default, tuple) or len(default) != 2:
+                non_numeric_fields.append(key)
+                continue
+
+            low, high = bounds
+            if low > high:
+                inverted_fields.append(key)
+
+        if invalid_fields:
+            raise ValueError(f"Invalid search_space_patch field(s): {', '.join(sorted(invalid_fields))}")
+        if non_numeric_fields:
+            raise ValueError(
+                "search_space_patch only supports numeric interval field(s); "
+                f"invalid: {', '.join(sorted(non_numeric_fields))}"
+            )
+        if inverted_fields:
+            raise ValueError(
+                "search_space_patch interval low must be <= high for field(s): "
+                f"{', '.join(sorted(inverted_fields))}"
+            )
+        return value
+
     def apply_to_search_space(self, base: OptunaSearchSpace) -> OptunaSearchSpace:
         data = base.model_dump()
         for key, bounds in self.search_space_patch.items():
