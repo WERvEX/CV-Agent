@@ -53,3 +53,26 @@ def test_load_config_works_without_local_override_file(tmp_path) -> None:
 
     assert config.max_rounds == 7
     assert config.epochs_per_round == 3
+
+
+def test_prompt_start_mode_resume_cancel_exits(monkeypatch, tmp_path):
+    import sys
+
+    import pytest
+
+    from cv_agent.cli import main
+    from cv_agent.core.config import TrainConfig
+    from cv_agent.interaction.types import SessionQuit
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        "cv_agent.tracking.checkpoint_manager.list_resumable_runs",
+        lambda output_root: [tmp_path / "exp_1"],
+    )
+    monkeypatch.setattr(
+        "cv_agent.ui.prompts.select_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SessionQuit("cancel")),
+    )
+
+    with pytest.raises(SystemExit):
+        main._prompt_start_mode(TrainConfig(output_root=tmp_path), "resume", None, None)

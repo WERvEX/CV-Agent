@@ -347,18 +347,18 @@ class TrainingEngine:
 
     def _do_train(self) -> None:
         """TRAIN: Run a single YOLO training round."""
-        self._round_num += 1
-        print_section(f"Training Round {self._round_num}/{self._config.max_rounds}")
+        attempt_round = self._round_num + 1
+        print_section(f"Training Round {attempt_round}/{self._config.max_rounds}")
 
         log_info(f"Hyperparameters: lr0={self._current_params.lr0:.5f}, "
                  f"batch={self._current_params.batch}, mosaic={self._current_params.mosaic:.3f}")
 
         # MLflow nested run for this round
-        self._mlflow.start_round(self._round_num)
+        self._mlflow.start_round(attempt_round)
         self._mlflow.log_params(self._current_params.model_dump())
 
         try:
-            initial_weights = self._resolve_initial_weights()
+            initial_weights = self._resolve_initial_weights(attempt_round)
             artifacts = self._yolo_trainer.train(
                 model_variant=self._config.model_variant,
                 data_yaml=self._config.data.data_yaml,
@@ -370,17 +370,18 @@ class TrainingEngine:
                 workers=self._config.workers,
                 use_amp=self._config.use_amp,
             )
+            self._round_num = attempt_round
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE
         except Exception as e:
-            log_error(f"Training failed in round {self._round_num}: {e}")
+            log_error(f"Training failed in round {attempt_round}: {e}")
             logger.exception("Training error traceback:")
             # Auto-rollback to best checkpoint if available
             if self._best_checkpoint and self._best_checkpoint.exists():
                 log_warning("Rolling back to best checkpoint...")
                 shutil.copy2(self._best_checkpoint, self._run_dir / "weights" / "best.pt")
             self._decision_log.append({
-                "round": self._round_num,
+                "round": attempt_round,
                 "color": "red",
                 "action": "training_crash",
                 "reason": str(e),
@@ -913,29 +914,30 @@ class TrainingEngine:
     # Setup & helpers
     # ------------------------------------------------------------------
 
-    def _resolve_initial_weights(self) -> Path | None:
+    def _resolve_initial_weights(self, round_num: int | None = None) -> Path | None:
         """Checkpoint to fine-tune from on rounds after the first (or fork on round 1)."""
-        if self._round_num <= 1:
+        round_num = round_num or self._round_num
+        if round_num <= 1:
             if self._fork_weights and self._fork_weights.exists():
-                log_info(f"Round {self._round_num}: fine-tuning from forked checkpoint {self._fork_weights.name}")
+                log_info(f"Round {round_num}: fine-tuning from forked checkpoint {self._fork_weights.name}")
                 return self._fork_weights
             return None
 
         if self._best_checkpoint and self._best_checkpoint.exists():
-            log_info(f"Round {self._round_num}: continuing from best snapshot {self._best_checkpoint.name}")
+            log_info(f"Round {round_num}: continuing from best snapshot {self._best_checkpoint.name}")
             return self._best_checkpoint
 
         last_pt = self._run_dir / "weights" / "last.pt"
         if last_pt.exists():
-            log_info(f"Round {self._round_num}: continuing from {last_pt.name}")
+            log_info(f"Round {round_num}: continuing from {last_pt.name}")
             return last_pt
 
         best_pt = self._run_dir / "weights" / "best.pt"
         if best_pt.exists():
-            log_info(f"Round {self._round_num}: continuing from {best_pt.name}")
+            log_info(f"Round {round_num}: continuing from {best_pt.name}")
             return best_pt
 
-        log_warning(f"Round {self._round_num}: no checkpoint found — falling back to pretrained weights.")
+        log_warning(f"Round {round_num}: no checkpoint found — falling back to pretrained weights.")
         return None
 
     def _maybe_record_top_checkpoint(self, round_result: RoundResult) -> None:

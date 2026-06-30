@@ -44,6 +44,23 @@ def test_ensure_dataset_returns_existing_populated_yaml(tmp_path):
     assert ensure_dataset(yaml_path, datasets_dir=tmp_path / "datasets") == yaml_path.resolve()
 
 
+def test_ensure_dataset_none_uses_console_logging_without_name_error(monkeypatch, tmp_path):
+    from cv_agent.data import bootstrap
+
+    expected = tmp_path / "coco.yaml"
+    expected.write_text(
+        "path: .\ntrain: images\nval: images\nnames: {0: object}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "a.jpg").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "resolve_datasets_dir", lambda datasets_dir=None: tmp_path)
+    monkeypatch.setattr(bootstrap, "_download_registry_dataset", lambda datasets_dir, name: expected)
+
+    assert bootstrap.ensure_dataset(None) == expected
+
+
 def test_ensure_dataset_prefers_downloaded_registry_yaml_over_bundled_spec(tmp_path, monkeypatch):
     """Bundled coco128.yaml exists but images live under datasets_dir (Ultralytics layout)."""
     bundled = tmp_path / "coco128.yaml"
