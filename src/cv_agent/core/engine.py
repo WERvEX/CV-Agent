@@ -57,7 +57,7 @@ from cv_agent.tracking.run_dir import (
     save_strategy_memory,
     snapshot_best_checkpoint,
 )
-from cv_agent.trainer.evaluator import Evaluator, RoundResult
+from cv_agent.trainer.evaluator import Evaluator, RoundResult, compute_weighted_score
 from cv_agent.trainer.yolo_trainer import YOLOTrainer
 from cv_agent.ui.console import (
     log_error,
@@ -460,6 +460,24 @@ class TrainingEngine:
             data_yaml=config.data.data_yaml,
             device=config.device,
         )
+
+        if (
+            self._active_strategy_patch is not None
+            and self._active_strategy_patch.objective_weights is not None
+        ):
+            raw_score = round_result.score
+            weighted_score = compute_weighted_score(
+                round_result.metrics,
+                self._active_strategy_patch.objective_weights,
+            )
+            round_result.score = weighted_score
+            round_result.metrics["strategy_unweighted_score"] = raw_score
+            round_result.metrics["strategy_weighted_score"] = weighted_score
+            log_info(
+                "Applied strategy objective weights: "
+                f"raw_score={raw_score:.4f}, weighted_score={weighted_score:.4f}, "
+                f"weights={self._active_strategy_patch.objective_weights.normalized().model_dump()}"
+            )
 
         comparison = self._evaluator.compare(round_result, self._history)
 

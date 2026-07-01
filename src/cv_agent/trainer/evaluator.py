@@ -14,9 +14,39 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from cv_agent.decision.strategy import ObjectiveWeights
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+
+def _metric_value(metrics: dict[str, float], *keys: str, default: float = 0.0) -> float:
+    """Return the first present metric key as a float."""
+    for key in keys:
+        value = metrics.get(key)
+        if value is not None:
+            return float(value)
+    return default
+
+
+def compute_weighted_score(metrics: dict[str, float], weights: ObjectiveWeights) -> float:
+    """Compute strategy objective score from metric values and objective weights."""
+    normalized = weights.normalized()
+    map50_95 = _metric_value(metrics, "mAP50-95", "metrics/mAP50-95(B)", "mAP50_95")
+    map50 = _metric_value(metrics, "mAP50", "metrics/mAP50(B)")
+    recall = _metric_value(metrics, "recall", "metrics/recall(B)")
+    precision = _metric_value(metrics, "precision", "metrics/precision(B)")
+    overfit_penalty = _metric_value(metrics, "overfit_penalty")
+    cost_penalty = _metric_value(metrics, "cost_penalty")
+
+    return (
+        map50_95 * normalized.map50_95
+        + map50 * normalized.map50
+        + recall * normalized.recall
+        + precision * normalized.precision
+        - overfit_penalty * normalized.overfit_penalty
+        - cost_penalty * normalized.cost_penalty
+    )
 
 # ---------------------------------------------------------------------------
 # Data models

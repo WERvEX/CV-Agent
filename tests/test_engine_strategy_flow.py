@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from cv_agent.core.config import HyperParams, TrainConfig
 from cv_agent.core.engine import TrainingEngine
 from cv_agent.core.state_machine import DecisionAction, DecisionColor
-from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
+from cv_agent.decision.strategy import ObjectiveWeights, StrategyPatch, StrategyPhase
 from cv_agent.decision.strategy_memory import StrategyMemory
 from cv_agent.decision.three_state import Decision
 from cv_agent.interaction.types import DecisionReview
@@ -242,6 +242,60 @@ def test_strategy_memory_records_active_patch_outcome_after_evaluation(
     assert engine._strategy_memory.effective_patterns
     assert "narrow lr" in engine._strategy_memory.effective_patterns[0]
     assert engine._strategy_memory_baseline_score is None
+
+
+def test_active_strategy_objective_weights_override_score_before_comparison_and_history(
+    tmp_path: Path,
+):
+    engine = _engine_with_strategy_state(tmp_path)
+    data_yaml = tmp_path / "data.yaml"
+    data_yaml.write_text("names: [class0]\n", encoding="utf-8")
+    engine._config = TrainConfig(
+        output_root=tmp_path,
+        max_rounds=2,
+        data={"data_yaml": data_yaml},
+    )
+    engine._round_num = 2
+    engine._active_strategy_patch = StrategyPatch(
+        phase=StrategyPhase.DATA_GAP,
+        reason="prefer recall",
+        objective_weights=ObjectiveWeights(
+            map50_95=0.0,
+            map50=0.0,
+            recall=1.0,
+            precision=0.0,
+            overfit_penalty=0.0,
+            cost_penalty=0.0,
+        ),
+    )
+    engine._last_artifacts = MagicMock()
+    engine._last_artifacts.results_csv = tmp_path / "results.csv"
+    engine._last_artifacts.best_pt = MagicMock()
+    engine._last_artifacts.last_pt = tmp_path / "last.pt"
+    engine._last_artifacts.best_pt.exists.return_value = False
+    engine._evaluator = MagicMock()
+    round_result = RoundResult(
+        round_num=2,
+        run_dir=tmp_path,
+        score=0.9,
+        metrics={"mAP50": 0.9, "recall": 0.25},
+    )
+    engine._evaluator.extract_metrics.return_value = round_result
+    engine._evaluator.enrich_from_validation.return_value = round_result
+    engine._evaluator.compare.return_value = EvaluationComparison(
+        current=round_result,
+        best_historical=engine._history[-1],
+    )
+    engine._mlflow = MagicMock()
+    engine._optuna = MagicMock()
+    engine._checkpoint_manager = MagicMock()
+
+    engine._do_evaluate()
+
+    compare_current = engine._evaluator.compare.call_args.args[0]
+    assert compare_current.score == 0.25
+    assert engine._history[-1].score == 0.25
+    assert engine._last_round_result.score == 0.25
 
 
 def test_do_decide_applies_strategy_patch_before_optuna_proposal(
