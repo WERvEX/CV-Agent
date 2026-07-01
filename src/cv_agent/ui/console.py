@@ -17,6 +17,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from cv_agent.decision.strategy import StrategyPatch
 from cv_agent.ui.terminal_charts import format_delta, sparkline
 
 # Keys excluded from bulk metric tables (shown via per-class summary instead).
@@ -321,6 +322,44 @@ def print_guidance_applied(
 
     if pause:
         press_enter_to_continue("Press Enter to continue…")
+    console.print()
+
+
+def print_strategy_patch(patch: StrategyPatch) -> None:
+    """Render the active LLM/controller strategy without verbose metadata."""
+    table = Table(
+        title="[bold cyan]LLM Strategy[/bold cyan]",
+        title_style="bold cyan",
+        show_header=False,
+        padding=(0, 1),
+    )
+    table.add_column("Field", style="bold cyan", width=18)
+    table.add_column("Value", style="bright_white", overflow="fold")
+
+    table.add_row("Phase", patch.phase.value)
+    table.add_row("Confidence", f"{patch.confidence:.2f}")
+    if patch.max_trials_for_phase is not None:
+        table.add_row("Phase trials", str(patch.max_trials_for_phase))
+    if patch.reason:
+        table.add_row("Reason", patch.reason)
+    if patch.search_space_patch:
+        bounds = ", ".join(
+            f"{key}=[{low:g}, {high:g}]"
+            for key, (low, high) in sorted(patch.search_space_patch.items())
+        )
+        table.add_row("Search bounds", bounds)
+    if patch.freeze:
+        table.add_row("Frozen", ", ".join(sorted(patch.freeze)))
+    if patch.objective_weights is not None:
+        weights = patch.objective_weights.normalized().model_dump()
+        active = {key: value for key, value in weights.items() if value > 0}
+        table.add_row(
+            "Objective",
+            ", ".join(f"{key}={value:.2f}" for key, value in active.items()),
+        )
+
+    console.print()
+    console.print(Panel(table, border_style="cyan"))
     console.print()
 
 

@@ -110,6 +110,7 @@ class YOLOTrainer:
             "exist_ok": True,
             "device": train_device,
             "workers": train_workers,
+            "verbose": False,
             # Disable Ultralytics' built-in MLflow autolog — cv_agent manages
             # its own MLflow tracking and the file-store warning is noisy.
             "plots": False,

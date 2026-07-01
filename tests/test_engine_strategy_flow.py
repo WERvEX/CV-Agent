@@ -140,10 +140,32 @@ def test_engine_low_confidence_strategy_keeps_active_patch(tmp_path: Path):
         confidence=0.2,
     )
 
-    result = engine._plan_strategy({"color": "red"})
+    result = engine._plan_strategy({"color": "yellow"})
 
     assert result == active_patch
     engine._optuna.set_strategy_patch.assert_not_called()
+
+
+def test_red_low_confidence_strategy_does_not_reuse_old_exploration_patch(tmp_path: Path):
+    config = TrainConfig(output_root=tmp_path, strategy={"min_confidence": 0.8})
+    engine = _engine_with_strategy_state(tmp_path, config=config)
+    engine._active_strategy_patch = StrategyPatch(
+        phase=StrategyPhase.EXPLORATION,
+        reason="old yellow exploration",
+        search_space_patch={"mosaic": (0.5, 1.0)},
+    )
+    engine._llm_advisor.plan_strategy.return_value = StrategyPatch(
+        phase=StrategyPhase.EXPLORATION,
+        reason="too uncertain",
+        confidence=0.2,
+    )
+
+    result = engine._plan_strategy({"color": "red"})
+
+    assert result is not None
+    assert result.phase == StrategyPhase.RECOVERY
+    assert "red decision" in result.reason
+    engine._optuna.set_strategy_patch.assert_called_once_with(result)
 
 
 def test_engine_strategy_cadence_reuses_active_patch_without_planning(tmp_path: Path):
@@ -311,7 +333,7 @@ def test_strategy_memory_records_active_patch_outcome_after_evaluation(
     assert engine._strategy_memory_baseline_score is None
 
 
-def test_active_strategy_objective_weights_override_score_before_comparison_and_history(
+def test_active_strategy_objective_weights_do_not_override_decision_score(
     tmp_path: Path,
 ):
     engine = _engine_with_strategy_state(tmp_path)
@@ -360,9 +382,11 @@ def test_active_strategy_objective_weights_override_score_before_comparison_and_
     engine._do_evaluate()
 
     compare_current = engine._evaluator.compare.call_args.args[0]
-    assert compare_current.score == 0.25
-    assert engine._history[-1].score == 0.25
-    assert engine._last_round_result.score == 0.25
+    assert compare_current.score == 0.9
+    assert engine._history[-1].score == 0.9
+    assert engine._last_round_result.score == 0.9
+    assert engine._last_round_result.metrics["strategy_weighted_score"] == 0.25
+    engine._optuna.report_result.assert_called_once_with(0.25, engine._current_params)
 
 
 def test_do_evaluate_injects_overfit_penalty_before_strategy_weighted_score(
@@ -416,7 +440,8 @@ def test_do_evaluate_injects_overfit_penalty_before_strategy_weighted_score(
 
     assert round_result.metrics["overfit_penalty"] == 1.0
     assert round_result.metrics["cost_penalty"] == 0.0
-    assert round(round_result.score, 3) == -0.1
+    assert round_result.score == 0.8
+    assert round(round_result.metrics["strategy_weighted_score"], 3) == -0.1
 
 
 def test_strategy_scoring_saves_audit_metrics_but_logs_only_numeric_metrics(

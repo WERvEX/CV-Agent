@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from cv_agent.core.config import HyperParams, TrainConfig
+from cv_agent.core.config import HyperParams, ObjectiveWeights, TrainConfig
 from cv_agent.core.state_machine import (
     DecisionAction,
     DecisionColor,
@@ -32,7 +32,7 @@ from cv_agent.decision.guidance import (
 )
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
-from cv_agent.decision.strategy import StrategyPatch
+from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
 from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
@@ -68,6 +68,7 @@ from cv_agent.ui.console import (
     print_guidance_applied,
     print_round_evaluation,
     print_section,
+    print_strategy_patch,
 )
 from cv_agent.ui.live_panel import LivePanel
 from cv_agent.utils.logging_setup import get_logger, setup_logging
@@ -520,13 +521,12 @@ class TrainingEngine:
                 scoring_metrics,
                 self._active_strategy_patch.objective_weights,
             )
-            round_result.score = weighted_score
             round_result.metrics["strategy_unweighted_score"] = raw_score
             round_result.metrics["strategy_weighted_score"] = weighted_score
             round_result.metrics.update(_strategy_audit_metrics(self._active_strategy_patch))
             log_info(
                 "Applied strategy objective weights: "
-                f"raw_score={raw_score:.4f}, weighted_score={weighted_score:.4f}, "
+                f"decision_score={raw_score:.4f}, optimizer_score={weighted_score:.4f}, "
                 f"weights={self._active_strategy_patch.objective_weights.normalized().model_dump()}"
             )
 
@@ -574,7 +574,10 @@ class TrainingEngine:
         self._record_strategy_memory_outcome(round_result)
 
         if self._optuna is not None and self._current_params is not None:
-            self._optuna.report_result(round_result.score, self._current_params)
+            self._optuna.report_result(
+                self._optimizer_score(round_result),
+                self._current_params,
+            )
 
         self._maybe_record_top_checkpoint(round_result)
         self._state = TrainingLoopState.DECIDE
@@ -588,6 +591,12 @@ class TrainingEngine:
         metrics.setdefault("overfit_penalty", 1.0 if round_result.overfitting else 0.0)
         metrics.setdefault("cost_penalty", 0.0)
         return metrics
+
+    @staticmethod
+    def _optimizer_score(round_result: RoundResult) -> float:
+        """Score reported to Optuna; may use strategy objective without changing decisions."""
+        weighted = round_result.metrics.get("strategy_weighted_score")
+        return float(weighted) if isinstance(weighted, int | float) else round_result.score
 
     def _do_decide(self) -> None:
         """DECIDE: Classify round, determine action, mutate params, check for done."""
@@ -609,6 +618,7 @@ class TrainingEngine:
         strategy_patch = self._plan_strategy(decision.to_dict())
         if strategy_patch is not None:
             decision.metadata["strategy_patch"] = strategy_patch.model_dump()
+            print_strategy_patch(strategy_patch)
 
         checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
 
@@ -888,7 +898,10 @@ class TrainingEngine:
         """Plan and apply strategy constraints for the next Optuna proposal."""
         if not self._config.strategy.enabled:
             return None
+        color = str(decision_summary.get("color", "")).lower()
         if self._round_num % self._config.strategy.planner_cadence != 0:
+            if color == "red":
+                return self._apply_red_recovery_strategy(reason="red decision forced recovery strategy")
             return self._active_strategy_patch
 
         round_result = getattr(self, "_last_round_result", None)
@@ -907,6 +920,10 @@ class TrainingEngine:
             base_search_space=self._config.optuna.search_space.model_dump(),
         )
         if patch.confidence < self._config.strategy.min_confidence:
+            if color == "red":
+                return self._apply_red_recovery_strategy(
+                    reason="low-confidence planner output ignored; red decision forced recovery strategy"
+                )
             return self._active_strategy_patch
 
         self._active_strategy_patch = patch
@@ -924,6 +941,30 @@ class TrainingEngine:
             )
         return patch
 
+    def _apply_red_recovery_strategy(self, *, reason: str) -> StrategyPatch:
+        """Replace stale exploration constraints with conservative recovery after RED."""
+        patch = StrategyPatch(
+            phase=StrategyPhase.RECOVERY,
+            reason=reason,
+            search_space_patch={"lr0": (0.001, 0.004), "mosaic": (0.0, 0.5)},
+            freeze={"batch"},
+            objective_weights=ObjectiveWeights(
+                map50_95=0.20,
+                map50=0.10,
+                recall=0.35,
+                precision=0.10,
+                overfit_penalty=0.25,
+                cost_penalty=0.0,
+            ).normalized(),
+            confidence=0.6,
+            metadata={"source": "engine_recovery", "round": self._round_num},
+        )
+        self._active_strategy_patch = patch
+        if self._optuna is not None:
+            self._optuna.set_strategy_patch(patch)
+        self._strategy_log.append(patch.model_dump(mode="json"))
+        return patch
+
     def _record_strategy_memory_outcome(self, round_result: RoundResult) -> None:
         """Record one evaluated outcome for the active planned strategy patch."""
         if (
@@ -938,7 +979,7 @@ class TrainingEngine:
         self._strategy_memory.record_round(
             patch=self._active_strategy_patch,
             before_score=self._strategy_memory_baseline_score,
-            after_score=round_result.score,
+            after_score=self._optimizer_score(round_result),
             params=self._current_params.model_dump(),
         )
         self._strategy_memory_baseline_score = None

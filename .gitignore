@@ -37,6 +37,8 @@ ENV/
 # ─────────────────────────────────────────────────────────────
 .pytest_cache/
 .tmp_pytest/
+.pytest_tmp*/
+tmp_pytest*/
 .coverage
 .coverage.*
 htmlcov/
@@ -91,6 +93,7 @@ datasets/
 .env.*
 *.local.yaml
 secrets.yaml
+Ultralytics/
 
 # ─────────────────────────────────────────────────────────────
 # MLflow local stores

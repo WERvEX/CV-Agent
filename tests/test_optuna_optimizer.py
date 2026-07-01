@@ -4,10 +4,17 @@ import optuna
 
 from cv_agent.core.config import HyperParams, OptunaConfig
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
+from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
 
 
 class FakeTrial:
     number = 7
+
+    def suggest_float(self, name: str, low: float, high: float) -> float:
+        return low
+
+    def suggest_categorical(self, name: str, choices: list[int]) -> int:
+        return choices[0]
 
 
 class FakeStudy:
@@ -82,3 +89,23 @@ def test_set_trial_count_respects_budget(tmp_path, monkeypatch):
 
     assert from_optuna is False
     assert params.lr0 == HyperParams().lr0
+
+
+def test_strategy_phase_trial_limit_stops_new_ask(tmp_path, monkeypatch):
+    optimizer = OptunaOptimizer(OptunaConfig(n_trials=10), study_db=tmp_path / "study.db")
+    monkeypatch.setattr(optimizer, "_init_study", lambda: None)
+    optimizer._study = FakeStudy()
+    optimizer.set_strategy_patch(
+        StrategyPatch(
+            phase=StrategyPhase.EXPLOITATION,
+            reason="short phase",
+            max_trials_for_phase=1,
+        )
+    )
+
+    first_params, first_from_optuna = optimizer.propose_next(HyperParams(), "green")
+    second_params, second_from_optuna = optimizer.propose_next(first_params, "green")
+
+    assert first_from_optuna is True
+    assert second_from_optuna is False
+    assert second_params == first_params

@@ -32,6 +32,8 @@ class OptunaOptimizer:
         self._pending_trial = None
         self._pending_params: HyperParams | None = None
         self._trial_count = 0
+        self._phase_trial_start_count: int | None = None
+        self._phase_trial_limit: int | None = None
 
         self._sa_temperature: float = 1.0
         self._sa_decay: float = 0.9
@@ -90,6 +92,8 @@ class OptunaOptimizer:
             else self.search_space
         )
         self._frozen_fields = set(patch.freeze) if patch is not None else set()
+        self._phase_trial_start_count = self._trial_count if patch is not None else None
+        self._phase_trial_limit = patch.max_trials_for_phase if patch is not None else None
 
     def _sync_trial_count_from_study(self) -> None:
         if self._study is None:
@@ -188,7 +192,11 @@ class OptunaOptimizer:
         return params
 
     def _trial_budget_exhausted(self) -> bool:
-        return self._trial_count >= self.config.n_trials
+        if self._trial_count >= self.config.n_trials:
+            return True
+        if self._phase_trial_limit is None or self._phase_trial_start_count is None:
+            return False
+        return (self._trial_count - self._phase_trial_start_count) >= self._phase_trial_limit
 
     def _propose_bayesian(self, current_params: HyperParams) -> tuple[HyperParams, bool]:
         if self._trial_budget_exhausted():
