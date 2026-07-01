@@ -39,6 +39,7 @@ dev = [
 
 [project.scripts]
 cv_agent = "cv_agent.cli.main:cli"
+cvagent = "cv_agent.cli.main:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]

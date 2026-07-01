@@ -8,8 +8,10 @@ from cv_agent.ui.console import (
     print_decision_timeline,
     print_guidance_applied,
     print_round_evaluation,
+    print_strategy_patch,
     summarize_per_class_map50,
 )
+from cv_agent.decision.strategy import ObjectiveWeights, StrategyPatch, StrategyPhase
 
 
 def test_print_round_evaluation_renders_without_error():
@@ -99,3 +101,35 @@ def test_print_decision_timeline_renders_rows():
     assert "Decision Timeline" in text
     assert "GREEN" in text
     assert "YELLOW" in text
+
+
+def test_print_strategy_patch_renders_compact_summary():
+    out = StringIO()
+    console = Console(file=out, width=120, force_terminal=True)
+
+    from cv_agent.ui import console as console_mod
+    original = console_mod.console
+    console_mod.console = console
+    try:
+        print_strategy_patch(
+            StrategyPatch(
+                phase=StrategyPhase.EXPLOITATION,
+                reason="narrow lr after stable improvement",
+                search_space_patch={"lr0": (0.001, 0.003)},
+                freeze={"batch"},
+                objective_weights=ObjectiveWeights(recall=0.4, precision=0.1),
+                max_trials_for_phase=2,
+                confidence=0.72,
+                metadata={"raw_prompt": "verbose internal details"},
+            )
+        )
+        text = out.getvalue()
+    finally:
+        console_mod.console = original
+
+    assert "LLM Strategy" in text
+    assert "exploitation" in text
+    assert "lr0" in text
+    assert "batch" in text
+    assert "0.72" in text
+    assert "raw_prompt" not in text

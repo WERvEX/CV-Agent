@@ -102,6 +102,37 @@ class OptunaSearchSpace(BaseModel):
 # Sub-system configuration models
 # ---------------------------------------------------------------------------
 
+class ObjectiveWeights(BaseModel):
+    """Weights used to combine evaluation metrics into a strategy objective."""
+
+    map50_95: float = Field(default=0.45, ge=0.0)
+    map50: float = Field(default=0.15, ge=0.0)
+    recall: float = Field(default=0.20, ge=0.0)
+    precision: float = Field(default=0.10, ge=0.0)
+    overfit_penalty: float = Field(default=0.10, ge=0.0)
+    cost_penalty: float = Field(default=0.0, ge=0.0)
+
+    def normalized(self) -> ObjectiveWeights:
+        data = self.model_dump()
+        normalized_data = {key: 0.0 for key in data}
+        total = sum(float(value) for value in data.values())
+        if total <= 0:
+            return ObjectiveWeights()
+        for key, value in data.items():
+            normalized_data[key] = float(value) / total
+        return ObjectiveWeights(**normalized_data)
+
+
+class StrategyConfig(BaseModel):
+    """AI strategy planner configuration."""
+
+    enabled: bool = True
+    planner_cadence: int = Field(default=1, ge=1)
+    min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
+    memory_enabled: bool = True
+    max_memory_items: int = Field(default=50, ge=1, le=500)
+    objective_weights: ObjectiveWeights = Field(default_factory=ObjectiveWeights)
+
 class OptunaConfig(BaseModel):
     """Optuna optimizer configuration."""
 
@@ -182,6 +213,7 @@ class TrainConfig(BaseModel):
     model_variant: str = "yolo26s"
     epochs_per_round: int = 50
     max_rounds: int = 6
+    max_train_failures: int = Field(default=3, ge=1, le=50)
     interaction_mode: Literal["auto", "ask"] = "ask"
     auto_prompt_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
     optimize_for_class: str | None = None
@@ -189,9 +221,11 @@ class TrainConfig(BaseModel):
     device: str = "auto"
     workers: int | None = None  # DataLoader workers; None = 8 on Linux, 0 on Windows
     use_amp: bool = True  # false skips Ultralytics AMP check (no yolo26n.pt needed)
+    model_verbose: bool = False  # true lets Ultralytics print full model/training details
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mlflow_uri: str = "http://localhost:5000"
     experiment_name: str = "cv_agent"

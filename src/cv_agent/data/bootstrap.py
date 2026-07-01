@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from cv_agent.data.paths import candidate_datasets_dirs, resolve_dataset_root, resolve_datasets_dir
+from cv_agent.ui.console import log_info, log_success, log_warning
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)

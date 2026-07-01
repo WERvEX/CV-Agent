@@ -13,7 +13,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from cv_agent.core.config import HyperParams, TrainConfig
+from pydantic import ValidationError
+
+from cv_agent.core.config import HyperParams, ObjectiveWeights, TrainConfig
 from cv_agent.core.state_machine import (
     DecisionAction,
     DecisionColor,
@@ -30,6 +32,7 @@ from cv_agent.decision.guidance import (
 )
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
+from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
 from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
@@ -44,13 +47,17 @@ from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
     load_latest_decision_log,
+    load_strategy_log,
+    load_strategy_memory,
     restore_session_state,
     save_artifacts,
     save_data_gap_report,
     save_session_state,
+    save_strategy_log,
+    save_strategy_memory,
     snapshot_best_checkpoint,
 )
-from cv_agent.trainer.evaluator import Evaluator, RoundResult
+from cv_agent.trainer.evaluator import Evaluator, RoundResult, compute_weighted_score
 from cv_agent.trainer.yolo_trainer import YOLOTrainer
 from cv_agent.ui.console import (
     log_error,
@@ -61,11 +68,54 @@ from cv_agent.ui.console import (
     print_guidance_applied,
     print_round_evaluation,
     print_section,
+    print_strategy_patch,
 )
 from cv_agent.ui.live_panel import LivePanel
 from cv_agent.utils.logging_setup import get_logger, setup_logging
 
 logger = get_logger(__name__)
+
+
+_STRATEGY_PHASE_CODES = {
+    "exploration": 1.0,
+    "exploitation": 2.0,
+    "recovery": 3.0,
+    "data_gap": 4.0,
+    "stability_check": 5.0,
+}
+
+
+def _numeric_metrics(metrics: dict[str, Any]) -> dict[str, float]:
+    """Return MLflow-safe numeric metrics without mutating the source dict."""
+    return {
+        key: float(value)
+        for key, value in metrics.items()
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    }
+
+
+def _strategy_audit_metrics(patch: StrategyPatch) -> dict[str, Any]:
+    """Build local audit fields for strategy scoring decisions."""
+    phase = patch.phase.value
+    source = str(patch.metadata.get("source", patch.metadata.get("planner_source", "")))
+    identity = str(patch.metadata.get("id", f"{phase}:{patch.reason}"))
+    audit: dict[str, Any] = {
+        "strategy_patch_phase": phase,
+        "strategy_patch_source": source,
+        "strategy_patch_identity": identity,
+        "strategy_phase_code": _STRATEGY_PHASE_CODES.get(phase, 0.0),
+        "strategy_patch": {
+            "phase": phase,
+            "reason": patch.reason,
+            "source": source,
+            "identity": identity,
+        },
+    }
+    if patch.objective_weights is not None:
+        weights = patch.objective_weights.normalized().model_dump()
+        audit["strategy_objective_weights"] = weights
+        audit.update({f"strategy_weight_{key}": float(value) for key, value in weights.items()})
+    return audit
 
 
 # ---------------------------------------------------------------------------
@@ -95,12 +145,17 @@ class TrainingEngine:
         # State tracking
         self._red_tracker = RedCountTracker()
         self._round_num: int = 0
+        self._train_failures: int = 0
         self._history: list[RoundResult] = []
         self._best_checkpoint: Path | None = None
         self._best_score: float = 0.0
         self._best_round: int = 0
         self._current_params: HyperParams | None = None
         self._decision_log: list[dict[str, Any]] = []
+        self._strategy_log: list[dict[str, Any]] = []
+        self._strategy_memory = None
+        self._active_strategy_patch = None
+        self._strategy_memory_baseline_score: float | None = None
         self._llm_context_accumulator: str = ""
         self._checkpoint_manager: CheckpointManager | None = None
         self._fork_weights: Path | None = None
@@ -113,6 +168,7 @@ class TrainingEngine:
         """Execute a new closed-loop training session from pretrained weights."""
         self._fork_weights = None
         self._round_num = 0
+        self._train_failures = 0
         ts_dir = create_run_dir(config.output_root)
         self._begin_session(config, ts_dir)
 
@@ -131,6 +187,7 @@ class TrainingEngine:
     def _begin_session(self, config: TrainConfig, run_dir: Path) -> None:
         """Shared setup for fresh and forked training sessions."""
         self._config = config
+        self._train_failures = 0
         log_file = run_dir / "cv_agent.log"
         setup_logging(log_file=log_file)
         self._run_dir = run_dir
@@ -199,6 +256,8 @@ class TrainingEngine:
 
         self._setup_subsystems(config)
         self._decision_log = load_latest_decision_log(run_dir)
+        self._strategy_log = load_strategy_log(run_dir)
+        self._train_failures = 0
         self._round_num = int(session["round_num"])
         self._best_score = float(session.get("best_score", 0.0))
         self._best_round = int(session.get("best_round", self._round_num))
@@ -223,6 +282,29 @@ class TrainingEngine:
         optuna_count = session.get("optuna_trial_count")
         if optuna_count is not None and self._optuna is not None:
             self._optuna.set_trial_count(int(optuna_count))
+
+        if config.strategy.memory_enabled:
+            from cv_agent.decision.strategy_memory import StrategyMemory
+
+            memory_data = load_strategy_memory(run_dir)
+            if memory_data:
+                self._strategy_memory = StrategyMemory(**memory_data)
+
+        active_strategy_patch = session.get("active_strategy_patch")
+        if active_strategy_patch:
+            try:
+                self._active_strategy_patch = StrategyPatch(**active_strategy_patch)
+            except (TypeError, ValueError, ValidationError) as e:
+                self._active_strategy_patch = None
+                log_warning(f"Ignoring malformed active_strategy_patch in session_state: {e}")
+            else:
+                if self._optuna is not None:
+                    self._optuna.set_strategy_patch(self._active_strategy_patch)
+
+        baseline_score = session.get("strategy_memory_baseline_score")
+        self._strategy_memory_baseline_score = (
+            float(baseline_score) if baseline_score is not None else None
+        )
 
         self._mlflow.start_session(run_dir.name)
 
@@ -347,18 +429,18 @@ class TrainingEngine:
 
     def _do_train(self) -> None:
         """TRAIN: Run a single YOLO training round."""
-        self._round_num += 1
-        print_section(f"Training Round {self._round_num}/{self._config.max_rounds}")
+        attempt_round = self._round_num + 1
+        print_section(f"Training Round {attempt_round}/{self._config.max_rounds}")
 
         log_info(f"Hyperparameters: lr0={self._current_params.lr0:.5f}, "
                  f"batch={self._current_params.batch}, mosaic={self._current_params.mosaic:.3f}")
 
         # MLflow nested run for this round
-        self._mlflow.start_round(self._round_num)
+        self._mlflow.start_round(attempt_round)
         self._mlflow.log_params(self._current_params.model_dump())
 
         try:
-            initial_weights = self._resolve_initial_weights()
+            initial_weights = self._resolve_initial_weights(attempt_round)
             artifacts = self._yolo_trainer.train(
                 model_variant=self._config.model_variant,
                 data_yaml=self._config.data.data_yaml,
@@ -369,25 +451,38 @@ class TrainingEngine:
                 device=self._config.device,
                 workers=self._config.workers,
                 use_amp=self._config.use_amp,
+                model_verbose=self._config.model_verbose,
             )
+            self._round_num = attempt_round
+            self._train_failures = 0
             self._last_artifacts = artifacts
             self._state = TrainingLoopState.EVALUATE
         except Exception as e:
-            log_error(f"Training failed in round {self._round_num}: {e}")
+            self._train_failures += 1
+            log_error(f"Training failed in round {attempt_round}: {e}")
             logger.exception("Training error traceback:")
             # Auto-rollback to best checkpoint if available
             if self._best_checkpoint and self._best_checkpoint.exists():
                 log_warning("Rolling back to best checkpoint...")
                 shutil.copy2(self._best_checkpoint, self._run_dir / "weights" / "best.pt")
             self._decision_log.append({
-                "round": self._round_num,
+                "round": attempt_round,
                 "color": "red",
                 "action": "training_crash",
                 "reason": str(e),
             })
             self._mlflow.end_round()
-            # Don't count this as a real round, just retry
-            self._state = TrainingLoopState.TRAIN
+            # Don't count this as a real round, but stop deterministic crash loops.
+            if self._train_failures >= self._config.max_train_failures:
+                log_error(
+                    "Training failed "
+                    f"{self._train_failures} consecutive time(s); "
+                    f"reached max_train_failures={self._config.max_train_failures}. "
+                    "Stopping training loop."
+                )
+                self._state = TrainingLoopState.DONE
+            else:
+                self._state = TrainingLoopState.TRAIN
 
     def _do_evaluate(self) -> None:
         """EVALUATE: Extract metrics, compute reward, compare with history."""
@@ -415,6 +510,27 @@ class TrainingEngine:
             device=config.device,
         )
 
+        if (
+            self._active_strategy_patch is not None
+            and self._active_strategy_patch.objective_weights is not None
+        ):
+            scoring_metrics = self._metrics_with_strategy_penalties(round_result)
+            round_result.metrics["overfit_penalty"] = scoring_metrics["overfit_penalty"]
+            round_result.metrics["cost_penalty"] = scoring_metrics["cost_penalty"]
+            raw_score = round_result.score
+            weighted_score = compute_weighted_score(
+                scoring_metrics,
+                self._active_strategy_patch.objective_weights,
+            )
+            round_result.metrics["strategy_unweighted_score"] = raw_score
+            round_result.metrics["strategy_weighted_score"] = weighted_score
+            round_result.metrics.update(_strategy_audit_metrics(self._active_strategy_patch))
+            log_info(
+                "Applied strategy objective weights: "
+                f"decision_score={raw_score:.4f}, optimizer_score={weighted_score:.4f}, "
+                f"weights={self._active_strategy_patch.objective_weights.normalized().model_dump()}"
+            )
+
         comparison = self._evaluator.compare(round_result, self._history)
 
         best_hist = comparison.best_historical
@@ -434,7 +550,7 @@ class TrainingEngine:
         )
 
         # Log metrics to MLflow
-        self._mlflow.log_metrics(round_result.metrics, step=self._round_num)
+        self._mlflow.log_metrics(_numeric_metrics(round_result.metrics), step=self._round_num)
         self._mlflow.log_metrics({
             "score": round_result.score,
             "train_loss": round_result.train_loss_final or 0,
@@ -456,12 +572,32 @@ class TrainingEngine:
         self._last_round_result = round_result
         self._last_comparison = comparison
         self._history.append(round_result)
+        self._record_strategy_memory_outcome(round_result)
 
         if self._optuna is not None and self._current_params is not None:
-            self._optuna.report_result(round_result.score, self._current_params)
+            self._optuna.report_result(
+                self._optimizer_score(round_result),
+                self._current_params,
+            )
 
         self._maybe_record_top_checkpoint(round_result)
         self._state = TrainingLoopState.DECIDE
+
+    def _metrics_with_strategy_penalties(
+        self,
+        round_result: RoundResult,
+    ) -> dict[str, Any]:
+        """Return metrics with strategy penalty defaults for weighted scoring."""
+        metrics = dict(round_result.metrics)
+        metrics.setdefault("overfit_penalty", 1.0 if round_result.overfitting else 0.0)
+        metrics.setdefault("cost_penalty", 0.0)
+        return metrics
+
+    @staticmethod
+    def _optimizer_score(round_result: RoundResult) -> float:
+        """Score reported to Optuna; may use strategy objective without changing decisions."""
+        weighted = round_result.metrics.get("strategy_weighted_score")
+        return float(weighted) if isinstance(weighted, int | float) else round_result.score
 
     def _do_decide(self) -> None:
         """DECIDE: Classify round, determine action, mutate params, check for done."""
@@ -480,6 +616,10 @@ class TrainingEngine:
             comparison=comparison,
             current_params=self._current_params,
         )
+        strategy_patch = self._plan_strategy(decision.to_dict())
+        if strategy_patch is not None:
+            decision.metadata["strategy_patch"] = strategy_patch.model_dump()
+            print_strategy_patch(strategy_patch)
 
         checkpoint_hint = str(self._best_checkpoint) if self._best_checkpoint else None
 
@@ -490,6 +630,22 @@ class TrainingEngine:
             round_score=round_result.score,
         )
         decision.proposed_hyperparams = proposed_params
+
+        if comparison.best_historical is None and color == DecisionColor.GREEN.value:
+            log_info("First round accepted as baseline; skipping interactive review.")
+            self._handle_green(decision, round_result)
+            self._decision_log.append(decision.to_dict())
+            self._mlflow.log_decision(decision.to_dict(), self._round_num)
+            self._current_params = proposed_params
+            save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
+            self._save_session_state()
+            self._mlflow.end_round()
+            self._state = (
+                TrainingLoopState.DONE
+                if self._round_num >= self._config.max_rounds
+                else TrainingLoopState.TRAIN
+            )
+            return
 
         # Pick Ask/Auto for **this round's** decision review (before review runs).
         try:
@@ -755,6 +911,96 @@ class TrainingEngine:
         self._optuna.abandon_pending()
         return decision.next_hyperparams, False
 
+    def _plan_strategy(self, decision_summary: dict[str, Any]):
+        """Plan and apply strategy constraints for the next Optuna proposal."""
+        if not self._config.strategy.enabled:
+            return None
+        color = str(decision_summary.get("color", "")).lower()
+        if self._round_num % self._config.strategy.planner_cadence != 0:
+            if color == "red":
+                return self._apply_red_recovery_strategy(reason="red decision forced recovery strategy")
+            return self._active_strategy_patch
+
+        round_result = getattr(self, "_last_round_result", None)
+        metrics = round_result.metrics if round_result is not None else {}
+        memory = self._strategy_memory.model_dump() if self._strategy_memory is not None else {}
+        history = [
+            {"round": result.round_num, "score": result.score, "metrics": result.metrics}
+            for result in self._history[-10:]
+        ]
+        patch = self._llm_advisor.plan_strategy(
+            round_num=self._round_num,
+            decision_summary=decision_summary,
+            metrics=metrics,
+            history=history,
+            memory=memory,
+            base_search_space=self._config.optuna.search_space.model_dump(),
+        )
+        if patch.confidence < self._config.strategy.min_confidence:
+            if color == "red":
+                return self._apply_red_recovery_strategy(
+                    reason="low-confidence planner output ignored; red decision forced recovery strategy"
+                )
+            return self._active_strategy_patch
+
+        self._active_strategy_patch = patch
+        if self._optuna is not None:
+            self._optuna.set_strategy_patch(patch)
+        self._strategy_log.append(patch.model_dump(mode="json"))
+        if round_result is not None and patch.objective_weights is not None:
+            self._strategy_memory_baseline_score = compute_weighted_score(
+                self._metrics_with_strategy_penalties(round_result),
+                patch.objective_weights,
+            )
+        else:
+            self._strategy_memory_baseline_score = (
+                round_result.score if round_result is not None else None
+            )
+        return patch
+
+    def _apply_red_recovery_strategy(self, *, reason: str) -> StrategyPatch:
+        """Replace stale exploration constraints with conservative recovery after RED."""
+        patch = StrategyPatch(
+            phase=StrategyPhase.RECOVERY,
+            reason=reason,
+            search_space_patch={"lr0": (0.001, 0.004), "mosaic": (0.0, 0.5)},
+            freeze={"batch"},
+            objective_weights=ObjectiveWeights(
+                map50_95=0.20,
+                map50=0.10,
+                recall=0.35,
+                precision=0.10,
+                overfit_penalty=0.25,
+                cost_penalty=0.0,
+            ).normalized(),
+            confidence=0.6,
+            metadata={"source": "engine_recovery", "round": self._round_num},
+        )
+        self._active_strategy_patch = patch
+        if self._optuna is not None:
+            self._optuna.set_strategy_patch(patch)
+        self._strategy_log.append(patch.model_dump(mode="json"))
+        return patch
+
+    def _record_strategy_memory_outcome(self, round_result: RoundResult) -> None:
+        """Record one evaluated outcome for the active planned strategy patch."""
+        if (
+            not self._config.strategy.memory_enabled
+            or self._strategy_memory is None
+            or self._active_strategy_patch is None
+            or self._strategy_memory_baseline_score is None
+            or self._current_params is None
+        ):
+            return
+
+        self._strategy_memory.record_round(
+            patch=self._active_strategy_patch,
+            before_score=self._strategy_memory_baseline_score,
+            after_score=self._optimizer_score(round_result),
+            params=self._current_params.model_dump(),
+        )
+        self._strategy_memory_baseline_score = None
+
     def _handle_green(self, decision: Decision, round_result: RoundResult) -> None:
         """Green: commit checkpoint, update best, reset red counter."""
         log_success(f"GREEN — {decision.reason}")
@@ -913,29 +1159,30 @@ class TrainingEngine:
     # Setup & helpers
     # ------------------------------------------------------------------
 
-    def _resolve_initial_weights(self) -> Path | None:
+    def _resolve_initial_weights(self, round_num: int | None = None) -> Path | None:
         """Checkpoint to fine-tune from on rounds after the first (or fork on round 1)."""
-        if self._round_num <= 1:
+        round_num = round_num or self._round_num
+        if round_num <= 1:
             if self._fork_weights and self._fork_weights.exists():
-                log_info(f"Round {self._round_num}: fine-tuning from forked checkpoint {self._fork_weights.name}")
+                log_info(f"Round {round_num}: fine-tuning from forked checkpoint {self._fork_weights.name}")
                 return self._fork_weights
             return None
 
         if self._best_checkpoint and self._best_checkpoint.exists():
-            log_info(f"Round {self._round_num}: continuing from best snapshot {self._best_checkpoint.name}")
+            log_info(f"Round {round_num}: continuing from best snapshot {self._best_checkpoint.name}")
             return self._best_checkpoint
 
         last_pt = self._run_dir / "weights" / "last.pt"
         if last_pt.exists():
-            log_info(f"Round {self._round_num}: continuing from {last_pt.name}")
+            log_info(f"Round {round_num}: continuing from {last_pt.name}")
             return last_pt
 
         best_pt = self._run_dir / "weights" / "best.pt"
         if best_pt.exists():
-            log_info(f"Round {self._round_num}: continuing from {best_pt.name}")
+            log_info(f"Round {round_num}: continuing from {best_pt.name}")
             return best_pt
 
-        log_warning(f"Round {self._round_num}: no checkpoint found — falling back to pretrained weights.")
+        log_warning(f"Round {round_num}: no checkpoint found — falling back to pretrained weights.")
         return None
 
     def _maybe_record_top_checkpoint(self, round_result: RoundResult) -> None:
@@ -1015,8 +1262,17 @@ class TrainingEngine:
                 "interaction_mode": self._config.interaction_mode,
                 "red_streak": self._red_tracker.count,
                 "optuna_trial_count": self._optuna.trial_count if self._optuna else 0,
+                "active_strategy_patch": (
+                    self._active_strategy_patch.model_dump(mode="json")
+                    if self._active_strategy_patch is not None
+                    else None
+                ),
+                "strategy_memory_baseline_score": self._strategy_memory_baseline_score,
             },
         )
+        save_strategy_log(self._run_dir, self._strategy_log)
+        if self._config.strategy.memory_enabled and self._strategy_memory is not None:
+            save_strategy_memory(self._run_dir, self._strategy_memory.model_dump())
 
     def _set_interaction_mode(self, mode: str) -> None:
         """Hot-swap the interaction handler for the remainder of the session."""
@@ -1083,6 +1339,14 @@ class TrainingEngine:
 
         # LLM advisor
         self._llm_advisor = LLMAdvisor(config=config.llm)
+
+        # Strategy memory
+        if config.strategy.memory_enabled:
+            from cv_agent.decision.strategy_memory import StrategyMemory
+
+            self._strategy_memory = StrategyMemory(max_items=config.strategy.max_memory_items)
+        else:
+            self._strategy_memory = None
 
         # MLflow manager
         self._mlflow = MLflowManager(

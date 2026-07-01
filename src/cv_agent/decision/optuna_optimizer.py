@@ -12,6 +12,7 @@ import random
 from pathlib import Path
 
 from cv_agent.core.config import HyperParams, OptunaConfig
+from cv_agent.decision.strategy import StrategyPatch
 from cv_agent.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -23,11 +24,16 @@ class OptunaOptimizer:
     def __init__(self, config: OptunaConfig, study_db: Path | None = None) -> None:
         self.config = config
         self.search_space = config.search_space
+        self._strategy_patch: StrategyPatch | None = None
+        self._effective_search_space = self.search_space
+        self._frozen_fields: set[str] = set()
         self.study_db = str(study_db) if study_db else "optuna_study.db"
         self._study = None
         self._pending_trial = None
         self._pending_params: HyperParams | None = None
         self._trial_count = 0
+        self._phase_trial_start_count: int | None = None
+        self._phase_trial_limit: int | None = None
 
         self._sa_temperature: float = 1.0
         self._sa_decay: float = 0.9
@@ -76,6 +82,18 @@ class OptunaOptimizer:
     def set_trial_count(self, count: int) -> None:
         """Restore in-memory trial budget counter (e.g. on session resume)."""
         self._trial_count = max(0, count)
+
+    def set_strategy_patch(self, patch: StrategyPatch | None) -> None:
+        """Apply or clear strategy constraints for future Optuna proposals."""
+        self._strategy_patch = patch
+        self._effective_search_space = (
+            patch.apply_to_search_space(self.search_space)
+            if patch is not None
+            else self.search_space
+        )
+        self._frozen_fields = set(patch.freeze) if patch is not None else set()
+        self._phase_trial_start_count = self._trial_count if patch is not None else None
+        self._phase_trial_limit = patch.max_trials_for_phase if patch is not None else None
 
     def _sync_trial_count_from_study(self) -> None:
         if self._study is None:
@@ -174,7 +192,11 @@ class OptunaOptimizer:
         return params
 
     def _trial_budget_exhausted(self) -> bool:
-        return self._trial_count >= self.config.n_trials
+        if self._trial_count >= self.config.n_trials:
+            return True
+        if self._phase_trial_limit is None or self._phase_trial_start_count is None:
+            return False
+        return (self._trial_count - self._phase_trial_start_count) >= self._phase_trial_limit
 
     def _propose_bayesian(self, current_params: HyperParams) -> tuple[HyperParams, bool]:
         if self._trial_budget_exhausted():
@@ -184,7 +206,7 @@ class OptunaOptimizer:
         self._init_study()
         trial = self._study.ask()
         self._pending_trial = trial
-        params_dict = self._trial_to_params(trial)
+        params_dict = self._trial_to_params(trial, current_params)
         params = HyperParams(**params_dict)
         self._pending_params = params
         self._trial_count += 1
@@ -195,13 +217,18 @@ class OptunaOptimizer:
         )
         return params, True
 
-    def _trial_to_params(self, trial) -> dict:
-        ss = self.search_space
+    def _trial_to_params(self, trial, current_params: HyperParams | None = None) -> dict:
+        ss = self._effective_search_space
+        current = current_params.model_dump() if current_params is not None else {}
 
         def suggest_float_range(name: str, bounds: tuple[float, float]) -> float:
+            if name in self._frozen_fields and name in current:
+                return current[name]
             return trial.suggest_float(name, bounds[0], bounds[1])
 
         def suggest_categorical_int(name: str, choices: list[int]) -> int:
+            if name in self._frozen_fields and name in current:
+                return current[name]
             return trial.suggest_categorical(name, choices)
 
         return {
@@ -226,7 +253,7 @@ class OptunaOptimizer:
         }
 
     def _neighbor_batch(self, current_batch: int) -> int:
-        choices = sorted(self.search_space.batch)
+        choices = sorted(self._effective_search_space.batch)
         if not choices:
             return current_batch
         if current_batch not in choices:
@@ -242,7 +269,7 @@ class OptunaOptimizer:
     def _propose_random_walk(self, current_params: HyperParams) -> HyperParams:
         min_scale = self.config.random_walk_min_step_scale
         self._rw_step_scale = max(self._rw_step_scale * 0.95, min_scale)
-        ss = self.search_space
+        ss = self._effective_search_space
         current = current_params.model_dump()
         perturbed: dict = {}
 
@@ -265,7 +292,7 @@ class OptunaOptimizer:
             f"Random walk proposal (step_scale={self._rw_step_scale:.4f}): "
             f"lr0={perturbed['lr0']:.5f}, mosaic={perturbed['mosaic']:.3f}"
         )
-        return HyperParams(**perturbed)
+        return self._apply_local_constraints(HyperParams(**perturbed), current_params)
 
     def _propose_simulated_annealing(
         self,
@@ -302,10 +329,10 @@ class OptunaOptimizer:
             f"Simulated annealing: T={self._sa_temperature:.4f}, "
             f"best_score={self._sa_best_score:.4f}, accepted={accepted}"
         )
-        return result
+        return self._apply_local_constraints(result, current_params)
 
     def _random_neighbor(self, params: HyperParams) -> HyperParams:
-        ss = self.search_space
+        ss = self._effective_search_space
         current = params.model_dump()
         neighbor: dict = {}
 
@@ -325,6 +352,26 @@ class OptunaOptimizer:
             neighbor[key] = max(low, min(high, new_val))
 
         return HyperParams(**neighbor)
+
+    def _apply_local_constraints(
+        self,
+        candidate: HyperParams,
+        current_params: HyperParams,
+    ) -> HyperParams:
+        data = candidate.model_dump()
+        current = current_params.model_dump()
+
+        for key, value in list(data.items()):
+            bounds = getattr(self._effective_search_space, key, None)
+            if isinstance(bounds, tuple) and len(bounds) == 2:
+                low, high = bounds
+                data[key] = max(low, min(high, value))
+
+        for field in self._frozen_fields:
+            if field in current:
+                data[field] = current[field]
+
+        return HyperParams(**data)
 
     def _report_result(self, params: HyperParams, score: float) -> None:
         """Backward-compatible alias."""

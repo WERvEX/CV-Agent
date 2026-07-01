@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from cv_agent.core.config import HyperParams, OptunaConfig
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
+from cv_agent.decision.strategy import StrategyPatch
 
 
 def test_random_walk_batch_stays_neighbor(tmp_path):
@@ -38,3 +39,53 @@ def test_yellow_random_walk_propose_next_returns_hyperparams_not_nested_tuple(tm
     assert isinstance(params, HyperParams)
     assert from_optuna is False
     assert hasattr(params, "model_dump")
+
+
+def test_yellow_random_walk_with_patch_constrains_and_freezes_batch(tmp_path):
+    optimizer = OptunaOptimizer(
+        OptunaConfig(yellow_strategy="random_walk"),
+        study_db=tmp_path / "study.db",
+    )
+    optimizer.set_strategy_patch(
+        StrategyPatch(
+            search_space_patch={"lr0": (0.001, 0.002), "mosaic": (0.0, 0.1)},
+            freeze={"batch"},
+        )
+    )
+
+    for _ in range(30):
+        params, from_optuna = optimizer.propose_next(
+            HyperParams(lr0=0.01, mosaic=1.0, batch=64),
+            "yellow",
+            current_score=0.5,
+        )
+
+        assert from_optuna is False
+        assert 0.001 <= params.lr0 <= 0.002
+        assert 0.0 <= params.mosaic <= 0.1
+        assert params.batch == 64
+
+
+def test_yellow_simulated_annealing_with_patch_constrains_and_freezes_batch(tmp_path):
+    optimizer = OptunaOptimizer(
+        OptunaConfig(yellow_strategy="simulated_annealing"),
+        study_db=tmp_path / "study.db",
+    )
+    optimizer.set_strategy_patch(
+        StrategyPatch(
+            search_space_patch={"lr0": (0.001, 0.002), "mosaic": (0.0, 0.1)},
+            freeze={"batch"},
+        )
+    )
+
+    for _ in range(30):
+        params, from_optuna = optimizer.propose_next(
+            HyperParams(lr0=0.01, mosaic=1.0, batch=64),
+            "yellow",
+            current_score=0.5,
+        )
+
+        assert from_optuna is False
+        assert 0.001 <= params.lr0 <= 0.002
+        assert 0.0 <= params.mosaic <= 0.1
+        assert params.batch == 64

@@ -159,6 +159,7 @@ def _prompt_start_mode(
     """Prompt for fresh / resume / fork-from-checkpoint startup."""
     if start_override:
         if start_override == "resume" and run_dir_override is None and sys.stdin.isatty():
+            from cv_agent.interaction.types import SessionQuit
             from cv_agent.tracking.checkpoint_manager import list_resumable_runs
             from cv_agent.ui.prompts import select_action
 

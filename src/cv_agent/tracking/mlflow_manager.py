@@ -9,6 +9,7 @@ Handles graceful degradation when MLflow server is unreachable.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -39,10 +40,14 @@ class MLflowManager:
         # are read when MLflow builds its REST store singleton.
         os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
         os.environ.setdefault("MLFLOW_REQUEST_TIMEOUT", "5")
+        os.environ.setdefault("MLFLOW_ENABLE_ASYNC_TRACE_LOGGING", "false")
+        os.environ.setdefault("MLFLOW_TRACE_SAMPLING_RATIO", "0")
         # Newer MLflow rejects the file-store backend by default (maintenance
         # mode). We fall back to a local file store when no server is running,
         # so opt in explicitly to keep local tracking working.
         os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+        logging.getLogger("mlflow.tracing").setLevel(logging.ERROR)
+        logging.getLogger("mlflow.tracing.export").setLevel(logging.ERROR)
 
         self.tracking_uri = tracking_uri
         self.experiment_name = experiment_name

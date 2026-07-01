@@ -28,6 +28,7 @@ Run fully unattended (`auto`) on servers, or stay in the loop (`ask`) locally wi
 - [Interaction Modes](#interaction-modes)
 - [Decision System](#decision-system)
 - [Hyperparameter Optimization](#hyperparameter-optimization)
+- [AI Strategy Planner](#ai-strategy-planner)
 - [Checkpoints & Resume](#checkpoints--resume)
 - [Model Weights & Export](#model-weights--export)
 - [Dataset Validation & Supplement](#dataset-validation--supplement)
@@ -471,6 +472,14 @@ Legacy `search_strategy: random_walk|simulated_annealing` maps to Yellow escape 
 
 ---
 
+## AI Strategy Planner
+
+The LLM strategy planner does not emit exact training hyperparameters. It emits bounded strategy patches: search-space narrowing, frozen fields, objective weights, and phase selection. Optuna still proposes precise numeric values inside those validated bounds, keeping numeric optimization auditable while using the LLM for diagnosis and strategy selection.
+
+Strategy runs persist `strategy_memory.json` for useful and avoid patterns across rounds, `strategy_log.json` for planner decisions, and the current `active_strategy_patch` in `session_state.json` so resumed experiments continue with the same constraints.
+
+---
+
 ## Checkpoints & Resume
 
 ### Experiment layout
@@ -620,6 +629,17 @@ Starting YOLO training args for round 1 (and fallback). Includes `lr0`, `lrf`, `
 | `pruner` | `none` | `none` recommended; `median` / `hyperband` ineffective here |
 | `random_walk_min_step_scale` | `0.02` | Floor for Yellow random-walk step size |
 | `search_space.*` | see yaml | Per-param ranges; `batch` is a categorical list |
+
+### `strategy`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Run the AI strategy planner before Optuna proposals |
+| `planner_cadence` | `1` | Plan every N rounds |
+| `min_confidence` | `0.35` | Ignore planner patches below this confidence |
+| `memory_enabled` | `true` | Persist strategy memory between rounds and resumes |
+| `max_memory_items` | `50` | Maximum remembered effective / avoid patterns |
+| `objective_weights.*` | see yaml | Reward weights for mAP, recall, precision, overfit, and cost |
 
 ### `checkpoints`
 
