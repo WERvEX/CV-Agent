@@ -512,14 +512,12 @@ class TrainingEngine:
             self._active_strategy_patch is not None
             and self._active_strategy_patch.objective_weights is not None
         ):
-            round_result.metrics.setdefault(
-                "overfit_penalty",
-                1.0 if round_result.overfitting else 0.0,
-            )
-            round_result.metrics.setdefault("cost_penalty", 0.0)
+            scoring_metrics = self._metrics_with_strategy_penalties(round_result)
+            round_result.metrics["overfit_penalty"] = scoring_metrics["overfit_penalty"]
+            round_result.metrics["cost_penalty"] = scoring_metrics["cost_penalty"]
             raw_score = round_result.score
             weighted_score = compute_weighted_score(
-                round_result.metrics,
+                scoring_metrics,
                 self._active_strategy_patch.objective_weights,
             )
             round_result.score = weighted_score
@@ -580,6 +578,16 @@ class TrainingEngine:
 
         self._maybe_record_top_checkpoint(round_result)
         self._state = TrainingLoopState.DECIDE
+
+    def _metrics_with_strategy_penalties(
+        self,
+        round_result: RoundResult,
+    ) -> dict[str, Any]:
+        """Return metrics with strategy penalty defaults for weighted scoring."""
+        metrics = dict(round_result.metrics)
+        metrics.setdefault("overfit_penalty", 1.0 if round_result.overfitting else 0.0)
+        metrics.setdefault("cost_penalty", 0.0)
+        return metrics
 
     def _do_decide(self) -> None:
         """DECIDE: Classify round, determine action, mutate params, check for done."""
@@ -907,7 +915,7 @@ class TrainingEngine:
         self._strategy_log.append(patch.model_dump(mode="json"))
         if round_result is not None and patch.objective_weights is not None:
             self._strategy_memory_baseline_score = compute_weighted_score(
-                round_result.metrics,
+                self._metrics_with_strategy_penalties(round_result),
                 patch.objective_weights,
             )
         else:

@@ -86,6 +86,38 @@ def test_strategy_memory_baseline_recomputed_with_patch_objective_weights(
     assert engine._strategy_memory_baseline_score == 0.25
 
 
+def test_strategy_memory_baseline_applies_overfit_penalty_when_metric_missing(
+    tmp_path: Path,
+):
+    engine = _engine_with_strategy_state(tmp_path)
+    patch = StrategyPatch(
+        phase=StrategyPhase.RECOVERY,
+        reason="penalize prior overfit",
+        objective_weights=ObjectiveWeights(
+            map50_95=0.0,
+            map50=1.0,
+            recall=0.0,
+            precision=0.0,
+            overfit_penalty=1.0,
+            cost_penalty=0.0,
+        ),
+    )
+    engine._last_round_result = RoundResult(
+        round_num=1,
+        run_dir=tmp_path,
+        score=0.9,
+        metrics={"mAP50": 0.8},
+        overfitting=True,
+    )
+    engine._history = [engine._last_round_result]
+    engine._llm_advisor.plan_strategy.return_value = patch
+
+    result = engine._plan_strategy({"color": "red"})
+
+    assert result == patch
+    assert round(engine._strategy_memory_baseline_score, 3) == -0.1
+
+
 def test_engine_strategy_disabled_does_not_call_planner(tmp_path: Path):
     config = TrainConfig(output_root=tmp_path, strategy={"enabled": False})
     engine = _engine_with_strategy_state(tmp_path, config=config)
