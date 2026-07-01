@@ -5,6 +5,8 @@
 # This file deep-merges on top — include ONLY keys you want to change.
 # No local file? cv_agent runs fine with cv_agent.yaml alone.
 
+# model_verbose: true  # opt in only when you need full Ultralytics model details
+
 # --- Secrets (recommended: use env var instead of this file) ---
 #   export CV_AGENT_LLM_KEY="sk-..."
 llm:

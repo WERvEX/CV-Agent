@@ -12,6 +12,7 @@ auto_prompt_seconds: 10
 # Override: device: "0" (single) | "0,1,2,3" (explicit DDP) | cpu
 device: auto
 workers: 8             # DataLoader workers (Linux); use 0 on Windows if needed
+model_verbose: false   # true prints full Ultralytics model/training details
 
 # Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)
 optimize_for_class: null # e.g., "vehicle", "person"

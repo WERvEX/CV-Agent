@@ -551,3 +551,50 @@ def test_do_decide_applies_strategy_patch_before_optuna_proposal(
 
     assert calls == ["patch:exploitation", "proposal"]
     assert engine._decision_log[0]["metadata"]["strategy_patch"]["phase"] == "exploitation"
+
+
+def test_first_round_baseline_skips_interactive_review_but_applies_next_proposal(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import cv_agent.core.engine as engine_module
+
+    engine = _engine_with_strategy_state(
+        tmp_path,
+        config=TrainConfig(output_root=tmp_path, max_rounds=2, strategy={"enabled": False}),
+    )
+    engine._round_num = 1
+    engine._history = []
+    engine._last_round_result = RoundResult(
+        round_num=1,
+        run_dir=tmp_path,
+        score=0.6,
+        metrics={"mAP50": 0.6},
+    )
+    engine._last_comparison = EvaluationComparison(
+        current=engine._last_round_result,
+        best_historical=None,
+    )
+    engine._decision_engine = MagicMock()
+    engine._decision_engine.decide.return_value = Decision(
+        color=DecisionColor.GREEN.value,
+        action=DecisionAction.ACCEPT.value,
+        reason="First round -- accepting as baseline.",
+        next_hyperparams=engine._current_params,
+        metadata={"green_tier": "hard"},
+    )
+    proposed = HyperParams(lr0=0.002)
+    engine._optuna = MagicMock()
+    engine._optuna.propose_next.return_value = (proposed, True)
+    engine._interaction = MagicMock()
+    engine._mlflow = MagicMock()
+    engine._save_session_state = MagicMock()
+    monkeypatch.setattr(engine_module, "offer_mode_control", MagicMock())
+
+    engine._do_decide()
+
+    engine_module.offer_mode_control.assert_not_called()
+    engine._interaction.review_decision.assert_not_called()
+    engine._interaction.confirm_config_change.assert_not_called()
+    assert engine._current_params == proposed
+    assert engine._decision_log[0]["color"] == "green"

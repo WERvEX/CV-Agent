@@ -221,6 +221,7 @@ class TrainConfig(BaseModel):
     device: str = "auto"
     workers: int | None = None  # DataLoader workers; None = 8 on Linux, 0 on Windows
     use_amp: bool = True  # false skips Ultralytics AMP check (no yolo26n.pt needed)
+    model_verbose: bool = False  # true lets Ultralytics print full model/training details
     initial_hyperparams: HyperParams = Field(default_factory=HyperParams)
     decision: DecisionConfig = Field(default_factory=DecisionConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)

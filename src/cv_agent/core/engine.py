@@ -451,6 +451,7 @@ class TrainingEngine:
                 device=self._config.device,
                 workers=self._config.workers,
                 use_amp=self._config.use_amp,
+                model_verbose=self._config.model_verbose,
             )
             self._round_num = attempt_round
             self._train_failures = 0
@@ -629,6 +630,22 @@ class TrainingEngine:
             round_score=round_result.score,
         )
         decision.proposed_hyperparams = proposed_params
+
+        if comparison.best_historical is None and color == DecisionColor.GREEN.value:
+            log_info("First round accepted as baseline; skipping interactive review.")
+            self._handle_green(decision, round_result)
+            self._decision_log.append(decision.to_dict())
+            self._mlflow.log_decision(decision.to_dict(), self._round_num)
+            self._current_params = proposed_params
+            save_artifacts(run_dir=self._run_dir, decision_log=self._decision_log)
+            self._save_session_state()
+            self._mlflow.end_round()
+            self._state = (
+                TrainingLoopState.DONE
+                if self._round_num >= self._config.max_rounds
+                else TrainingLoopState.TRAIN
+            )
+            return
 
         # Pick Ask/Auto for **this round's** decision review (before review runs).
         try:

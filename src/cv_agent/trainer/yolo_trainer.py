@@ -69,6 +69,7 @@ class YOLOTrainer:
         device: str | int | list[int] | None = None,
         workers: int | None = None,
         use_amp: bool = True,
+        model_verbose: bool = False,
     ) -> TrainArtifacts:
         """Run a single YOLO training session.
 
@@ -110,7 +111,7 @@ class YOLOTrainer:
             "exist_ok": True,
             "device": train_device,
             "workers": train_workers,
-            "verbose": False,
+            "verbose": model_verbose,
             # Disable Ultralytics' built-in MLflow autolog — cv_agent manages
             # its own MLflow tracking and the file-store warning is noisy.
             "plots": False,
