@@ -75,6 +75,48 @@ from cv_agent.utils.logging_setup import get_logger, setup_logging
 logger = get_logger(__name__)
 
 
+_STRATEGY_PHASE_CODES = {
+    "exploration": 1.0,
+    "exploitation": 2.0,
+    "recovery": 3.0,
+    "data_gap": 4.0,
+    "stability_check": 5.0,
+}
+
+
+def _numeric_metrics(metrics: dict[str, Any]) -> dict[str, float]:
+    """Return MLflow-safe numeric metrics without mutating the source dict."""
+    return {
+        key: float(value)
+        for key, value in metrics.items()
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    }
+
+
+def _strategy_audit_metrics(patch: StrategyPatch) -> dict[str, Any]:
+    """Build local audit fields for strategy scoring decisions."""
+    phase = patch.phase.value
+    source = str(patch.metadata.get("source", patch.metadata.get("planner_source", "")))
+    identity = str(patch.metadata.get("id", f"{phase}:{patch.reason}"))
+    audit: dict[str, Any] = {
+        "strategy_patch_phase": phase,
+        "strategy_patch_source": source,
+        "strategy_patch_identity": identity,
+        "strategy_phase_code": _STRATEGY_PHASE_CODES.get(phase, 0.0),
+        "strategy_patch": {
+            "phase": phase,
+            "reason": patch.reason,
+            "source": source,
+            "identity": identity,
+        },
+    }
+    if patch.objective_weights is not None:
+        weights = patch.objective_weights.normalized().model_dump()
+        audit["strategy_objective_weights"] = weights
+        audit.update({f"strategy_weight_{key}": float(value) for key, value in weights.items()})
+    return audit
+
+
 # ---------------------------------------------------------------------------
 # TrainingEngine
 # ---------------------------------------------------------------------------
@@ -257,6 +299,11 @@ class TrainingEngine:
             else:
                 if self._optuna is not None:
                     self._optuna.set_strategy_patch(self._active_strategy_patch)
+
+        baseline_score = session.get("strategy_memory_baseline_score")
+        self._strategy_memory_baseline_score = (
+            float(baseline_score) if baseline_score is not None else None
+        )
 
         self._mlflow.start_session(run_dir.name)
 
@@ -465,6 +512,11 @@ class TrainingEngine:
             self._active_strategy_patch is not None
             and self._active_strategy_patch.objective_weights is not None
         ):
+            round_result.metrics.setdefault(
+                "overfit_penalty",
+                1.0 if round_result.overfitting else 0.0,
+            )
+            round_result.metrics.setdefault("cost_penalty", 0.0)
             raw_score = round_result.score
             weighted_score = compute_weighted_score(
                 round_result.metrics,
@@ -473,6 +525,7 @@ class TrainingEngine:
             round_result.score = weighted_score
             round_result.metrics["strategy_unweighted_score"] = raw_score
             round_result.metrics["strategy_weighted_score"] = weighted_score
+            round_result.metrics.update(_strategy_audit_metrics(self._active_strategy_patch))
             log_info(
                 "Applied strategy objective weights: "
                 f"raw_score={raw_score:.4f}, weighted_score={weighted_score:.4f}, "
@@ -498,7 +551,7 @@ class TrainingEngine:
         )
 
         # Log metrics to MLflow
-        self._mlflow.log_metrics(round_result.metrics, step=self._round_num)
+        self._mlflow.log_metrics(_numeric_metrics(round_result.metrics), step=self._round_num)
         self._mlflow.log_metrics({
             "score": round_result.score,
             "train_loss": round_result.train_loss_final or 0,
@@ -852,9 +905,15 @@ class TrainingEngine:
         if self._optuna is not None:
             self._optuna.set_strategy_patch(patch)
         self._strategy_log.append(patch.model_dump(mode="json"))
-        self._strategy_memory_baseline_score = (
-            round_result.score if round_result is not None else None
-        )
+        if round_result is not None and patch.objective_weights is not None:
+            self._strategy_memory_baseline_score = compute_weighted_score(
+                round_result.metrics,
+                patch.objective_weights,
+            )
+        else:
+            self._strategy_memory_baseline_score = (
+                round_result.score if round_result is not None else None
+            )
         return patch
 
     def _record_strategy_memory_outcome(self, round_result: RoundResult) -> None:
@@ -1142,6 +1201,7 @@ class TrainingEngine:
                     if self._active_strategy_patch is not None
                     else None
                 ),
+                "strategy_memory_baseline_score": self._strategy_memory_baseline_score,
             },
         )
         save_strategy_log(self._run_dir, self._strategy_log)
