@@ -30,6 +30,7 @@ from cv_agent.decision.guidance import (
 )
 from cv_agent.decision.llm_advisor import LLMAdvisor
 from cv_agent.decision.optuna_optimizer import OptunaOptimizer
+from cv_agent.decision.strategy import StrategyPatch
 from cv_agent.decision.three_state import Decision, ThreeStateDecisionEngine
 from cv_agent.interaction.ask_mode import AskModeHandler
 from cv_agent.interaction.auto_mode import AutoModeHandler
@@ -44,11 +45,13 @@ from cv_agent.tracking.mlflow_manager import MLflowManager
 from cv_agent.tracking.run_dir import (
     create_run_dir,
     load_latest_decision_log,
+    load_strategy_log,
     load_strategy_memory,
     restore_session_state,
     save_artifacts,
     save_data_gap_report,
     save_session_state,
+    save_strategy_log,
     save_strategy_memory,
     snapshot_best_checkpoint,
 )
@@ -107,6 +110,7 @@ class TrainingEngine:
         self._strategy_log: list[dict[str, Any]] = []
         self._strategy_memory = None
         self._active_strategy_patch = None
+        self._strategy_memory_baseline_score: float | None = None
         self._llm_context_accumulator: str = ""
         self._checkpoint_manager: CheckpointManager | None = None
         self._fork_weights: Path | None = None
@@ -207,6 +211,7 @@ class TrainingEngine:
 
         self._setup_subsystems(config)
         self._decision_log = load_latest_decision_log(run_dir)
+        self._strategy_log = load_strategy_log(run_dir)
         self._train_failures = 0
         self._round_num = int(session["round_num"])
         self._best_score = float(session.get("best_score", 0.0))
@@ -239,6 +244,12 @@ class TrainingEngine:
             memory_data = load_strategy_memory(run_dir)
             if memory_data:
                 self._strategy_memory = StrategyMemory(**memory_data)
+
+        active_strategy_patch = session.get("active_strategy_patch")
+        if active_strategy_patch:
+            self._active_strategy_patch = StrategyPatch(**active_strategy_patch)
+            if self._optuna is not None:
+                self._optuna.set_strategy_patch(self._active_strategy_patch)
 
         self._mlflow.start_session(run_dir.name)
 
@@ -484,6 +495,7 @@ class TrainingEngine:
         self._last_round_result = round_result
         self._last_comparison = comparison
         self._history.append(round_result)
+        self._record_strategy_memory_outcome(round_result)
 
         if self._optuna is not None and self._current_params is not None:
             self._optuna.report_result(round_result.score, self._current_params)
@@ -814,8 +826,30 @@ class TrainingEngine:
         self._active_strategy_patch = patch
         if self._optuna is not None:
             self._optuna.set_strategy_patch(patch)
-        self._strategy_log.append(patch.model_dump())
+        self._strategy_log.append(patch.model_dump(mode="json"))
+        self._strategy_memory_baseline_score = (
+            round_result.score if round_result is not None else None
+        )
         return patch
+
+    def _record_strategy_memory_outcome(self, round_result: RoundResult) -> None:
+        """Record one evaluated outcome for the active planned strategy patch."""
+        if (
+            not self._config.strategy.memory_enabled
+            or self._strategy_memory is None
+            or self._active_strategy_patch is None
+            or self._strategy_memory_baseline_score is None
+            or self._current_params is None
+        ):
+            return
+
+        self._strategy_memory.record_round(
+            patch=self._active_strategy_patch,
+            before_score=self._strategy_memory_baseline_score,
+            after_score=round_result.score,
+            params=self._current_params.model_dump(),
+        )
+        self._strategy_memory_baseline_score = None
 
     def _handle_green(self, decision: Decision, round_result: RoundResult) -> None:
         """Green: commit checkpoint, update best, reset red counter."""
@@ -1078,8 +1112,14 @@ class TrainingEngine:
                 "interaction_mode": self._config.interaction_mode,
                 "red_streak": self._red_tracker.count,
                 "optuna_trial_count": self._optuna.trial_count if self._optuna else 0,
+                "active_strategy_patch": (
+                    self._active_strategy_patch.model_dump(mode="json")
+                    if self._active_strategy_patch is not None
+                    else None
+                ),
             },
         )
+        save_strategy_log(self._run_dir, self._strategy_log)
         if self._config.strategy.memory_enabled and self._strategy_memory is not None:
             save_strategy_memory(self._run_dir, self._strategy_memory.model_dump())
 

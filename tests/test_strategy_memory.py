@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
 from cv_agent.decision.strategy_memory import StrategyMemory
-from cv_agent.tracking.run_dir import load_strategy_memory, save_strategy_memory
+from cv_agent.tracking.run_dir import (
+    load_strategy_log,
+    load_strategy_memory,
+    save_strategy_log,
+    save_strategy_memory,
+)
 
 
 def test_strategy_memory_records_effective_and_avoid_patterns():
@@ -58,3 +63,21 @@ def test_strategy_memory_persistence_save_load_and_missing(tmp_path):
     save_strategy_memory(run_dir, memory)
 
     assert load_strategy_memory(run_dir) == memory
+
+
+def test_strategy_log_persistence_save_load_and_missing(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    strategy_log = [
+        StrategyPatch(
+            phase=StrategyPhase.RECOVERY,
+            reason="recover",
+            search_space_patch={"lr0": (0.001, 0.002)},
+        ).model_dump(mode="json")
+    ]
+
+    assert load_strategy_log(run_dir) == []
+
+    save_strategy_log(run_dir, strategy_log)
+
+    assert load_strategy_log(run_dir) == strategy_log

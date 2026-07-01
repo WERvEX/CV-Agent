@@ -7,8 +7,10 @@ from cv_agent.core.config import HyperParams, TrainConfig
 from cv_agent.core.engine import TrainingEngine
 from cv_agent.core.state_machine import DecisionAction, DecisionColor
 from cv_agent.decision.strategy import StrategyPatch, StrategyPhase
+from cv_agent.decision.strategy_memory import StrategyMemory
 from cv_agent.decision.three_state import Decision
 from cv_agent.interaction.types import DecisionReview
+from cv_agent.tracking.run_dir import load_strategy_log, save_session_state
 from cv_agent.trainer.evaluator import EvaluationComparison, RoundResult
 
 
@@ -92,6 +94,110 @@ def test_engine_strategy_cadence_reuses_active_patch_without_planning(tmp_path: 
     assert result == active_patch
     engine._llm_advisor.plan_strategy.assert_not_called()
     engine._optuna.set_strategy_patch.assert_not_called()
+
+
+def test_resume_restores_active_strategy_patch_and_applies_to_optuna(
+    tmp_path: Path,
+    monkeypatch,
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "args.yaml").write_text("lr0: 0.01\n", encoding="utf-8")
+    patch = StrategyPatch(
+        phase=StrategyPhase.RECOVERY,
+        reason="resume constraints",
+        search_space_patch={"lr0": (0.001, 0.002)},
+    )
+    save_session_state(
+        run_dir,
+        {
+            "round_num": 1,
+            "best_score": 0.5,
+            "best_round": 1,
+            "best_checkpoint": None,
+            "history_scores": [0.5],
+            "current_params": HyperParams(lr0=0.01).model_dump(),
+            "active_strategy_patch": patch.model_dump(mode="json"),
+        },
+    )
+    engine = TrainingEngine()
+    optuna = MagicMock()
+    mlflow = MagicMock()
+
+    def fake_setup(self, config):
+        self._optuna = optuna
+        self._mlflow = mlflow
+        self._red_tracker.count = 0
+
+    monkeypatch.setattr(TrainingEngine, "_setup_subsystems", fake_setup)
+    monkeypatch.setattr(TrainingEngine, "_main_loop", lambda self: None)
+    monkeypatch.setattr(TrainingEngine, "_print_summary", lambda self: None)
+
+    engine.resume(run_dir, TrainConfig(output_root=tmp_path, max_rounds=2))
+
+    assert engine._active_strategy_patch == patch
+    optuna.set_strategy_patch.assert_called_once_with(patch)
+
+
+def test_save_session_state_persists_active_strategy_patch_and_strategy_log(
+    tmp_path: Path,
+):
+    engine = _engine_with_strategy_state(tmp_path)
+    patch = StrategyPatch(phase=StrategyPhase.EXPLORATION, reason="persist me")
+    engine._active_strategy_patch = patch
+    engine._strategy_log = [patch.model_dump(mode="json")]
+    engine._config = TrainConfig(output_root=tmp_path, max_rounds=2)
+
+    engine._save_session_state()
+
+    state = (tmp_path / "session_state.json").read_text(encoding="utf-8")
+    assert "active_strategy_patch" in state
+    assert load_strategy_log(tmp_path) == [patch.model_dump(mode="json")]
+
+
+def test_strategy_memory_records_active_patch_outcome_after_evaluation(
+    tmp_path: Path,
+):
+    engine = _engine_with_strategy_state(tmp_path)
+    data_yaml = tmp_path / "data.yaml"
+    data_yaml.write_text("names: [class0]\n", encoding="utf-8")
+    patch = StrategyPatch(phase=StrategyPhase.EXPLOITATION, reason="narrow lr")
+    engine._active_strategy_patch = patch
+    engine._strategy_memory = StrategyMemory(max_items=3)
+    engine._strategy_memory_baseline_score = 0.5
+    engine._config = TrainConfig(
+        output_root=tmp_path,
+        max_rounds=2,
+        data={"data_yaml": data_yaml},
+    )
+    engine._current_params = HyperParams(lr0=0.002)
+    engine._last_artifacts = MagicMock()
+    engine._last_artifacts.results_csv = tmp_path / "results.csv"
+    engine._last_artifacts.best_pt = MagicMock()
+    engine._last_artifacts.last_pt = tmp_path / "last.pt"
+    engine._last_artifacts.best_pt.exists.return_value = False
+    engine._evaluator = MagicMock()
+    round_result = RoundResult(
+        round_num=2,
+        run_dir=tmp_path,
+        score=0.6,
+        metrics={"mAP50": 0.6},
+    )
+    engine._evaluator.extract_metrics.return_value = round_result
+    engine._evaluator.enrich_from_validation.return_value = round_result
+    engine._evaluator.compare.return_value = EvaluationComparison(
+        current=round_result,
+        best_historical=engine._history[-1],
+    )
+    engine._mlflow = MagicMock()
+    engine._optuna = MagicMock()
+    engine._checkpoint_manager = MagicMock()
+
+    engine._do_evaluate()
+
+    assert engine._strategy_memory.effective_patterns
+    assert "narrow lr" in engine._strategy_memory.effective_patterns[0]
+    assert engine._strategy_memory_baseline_score is None
 
 
 def test_do_decide_applies_strategy_patch_before_optuna_proposal(

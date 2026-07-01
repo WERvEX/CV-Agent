@@ -214,6 +214,23 @@ def load_strategy_memory(run_dir: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+def save_strategy_log(run_dir: Path, strategy_log: list[dict[str, Any]]) -> None:
+    """Persist strategy planner decisions for a training run."""
+    path = run_dir / "strategy_log.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(strategy_log, fh, indent=2, default=str, ensure_ascii=False)
+    logger.info(f"Saved strategy log to {path}")
+
+
+def load_strategy_log(run_dir: Path) -> list[dict[str, Any]]:
+    """Load strategy planner decisions, returning an empty list when missing."""
+    path = run_dir / "strategy_log.json"
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def hyperparams_from_args_yaml(args_yaml: Path) -> dict[str, Any]:
     """Extract HyperParams-compatible fields from an Ultralytics args.yaml."""
     import yaml
