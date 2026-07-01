@@ -112,7 +112,7 @@ class ObjectiveWeights(BaseModel):
     overfit_penalty: float = Field(default=0.10, ge=0.0)
     cost_penalty: float = Field(default=0.0, ge=0.0)
 
-    def normalized(self) -> "ObjectiveWeights":
+    def normalized(self) -> ObjectiveWeights:
         data = self.model_dump()
         normalized_data = {key: 0.0 for key in data}
         total = sum(float(value) for value in data.values())
