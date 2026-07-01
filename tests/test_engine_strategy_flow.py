@@ -139,6 +139,50 @@ def test_resume_restores_active_strategy_patch_and_applies_to_optuna(
     optuna.set_strategy_patch.assert_called_once_with(patch)
 
 
+def test_resume_ignores_malformed_active_strategy_patch(
+    tmp_path: Path,
+    monkeypatch,
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "args.yaml").write_text("lr0: 0.01\n", encoding="utf-8")
+    save_session_state(
+        run_dir,
+        {
+            "round_num": 1,
+            "best_score": 0.5,
+            "best_round": 1,
+            "best_checkpoint": None,
+            "history_scores": [0.5],
+            "current_params": HyperParams(lr0=0.01).model_dump(),
+            "active_strategy_patch": {"phase": "bogus", "reason": "bad state"},
+        },
+    )
+    engine = TrainingEngine()
+    optuna = MagicMock()
+    mlflow = MagicMock()
+    loop_reached = False
+
+    def fake_setup(self, config):
+        self._optuna = optuna
+        self._mlflow = mlflow
+        self._red_tracker.count = 0
+
+    def fake_main_loop(self):
+        nonlocal loop_reached
+        loop_reached = True
+
+    monkeypatch.setattr(TrainingEngine, "_setup_subsystems", fake_setup)
+    monkeypatch.setattr(TrainingEngine, "_main_loop", fake_main_loop)
+    monkeypatch.setattr(TrainingEngine, "_print_summary", lambda self: None)
+
+    engine.resume(run_dir, TrainConfig(output_root=tmp_path, max_rounds=2))
+
+    assert loop_reached
+    assert engine._active_strategy_patch is None
+    optuna.set_strategy_patch.assert_not_called()
+
+
 def test_save_session_state_persists_active_strategy_patch_and_strategy_log(
     tmp_path: Path,
 ):

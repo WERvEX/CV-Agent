@@ -13,6 +13,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from cv_agent.core.config import HyperParams, TrainConfig
 from cv_agent.core.state_machine import (
     DecisionAction,
@@ -247,9 +249,14 @@ class TrainingEngine:
 
         active_strategy_patch = session.get("active_strategy_patch")
         if active_strategy_patch:
-            self._active_strategy_patch = StrategyPatch(**active_strategy_patch)
-            if self._optuna is not None:
-                self._optuna.set_strategy_patch(self._active_strategy_patch)
+            try:
+                self._active_strategy_patch = StrategyPatch(**active_strategy_patch)
+            except (TypeError, ValueError, ValidationError) as e:
+                self._active_strategy_patch = None
+                log_warning(f"Ignoring malformed active_strategy_patch in session_state: {e}")
+            else:
+                if self._optuna is not None:
+                    self._optuna.set_strategy_patch(self._active_strategy_patch)
 
         self._mlflow.start_session(run_dir.name)
 
