@@ -15,5 +15,8 @@ llm:
 # --- Optional overrides (uncomment as needed) ---
 # interaction_mode: auto   # Docker / nohup / non-interactive servers
 # mlflow_uri: http://mlflow.internal:5000
+#
+# Docker/server COCO without Ultralytics auto-download:
+# mount host ./datasets to /app/datasets and use the bundled /app/coco_local.yaml.
 # data:
-#   data_yaml: /data/dataset.yaml
+#   data_yaml: /app/coco_local.yaml

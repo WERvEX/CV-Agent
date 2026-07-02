@@ -244,24 +244,23 @@ On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacent
 git clone <your-repo-url>
 cd cv_agent
 
-# Build image (bundles cv_agent.yaml; local overrides are optional)
+# Build image (bundles cv_agent.yaml and coco_local.yaml; local overrides are optional)
 docker build -t cv_agent:latest .
 mkdir -p runs datasets
 ```
 
-**Config:** defaults come from **`cv_agent.yaml`** (inside the image). Mount host config if you changed it: `-v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro"`.
+**Config:** defaults come from **`cv_agent.yaml`** (inside the image). For server COCO runs with an already downloaded `./datasets/coco`, set `data.data_yaml: /app/coco_local.yaml` once in `cv_agent.local.yaml` and mount that file.
 
 **Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
 
 ```bash
-docker run -dit --gpus '"device=0,1,2,3"' --shm-size=8g --name cv_agent_train \
+docker run -dit --gpus '"device=0,1,2,3"' --ipc=host --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets" \
-  -v "$(pwd)/datasets:/datasets" \
+  -v "$(pwd)/datasets:/app/datasets:ro" \
   -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
   -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml
+  cv_agent:latest --interaction auto run --device 0,1,2,3
 ```
 
 If NCCL still fails, try `--ipc=host` instead of/in addition to `--shm-size=8g`.
@@ -271,10 +270,9 @@ If NCCL still fails, try `--ipc=host` instead of/in addition to `--shm-size=8g`.
 ```bash
 docker run -dit --gpus '"device=0"' --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets" \
-  -v "$(pwd)/datasets:/datasets" \
-  -v "$(pwd)/cv_agent.yaml:/app/cv_agent.yaml:ro" \
-  cv_agent:latest run --data-yaml /app/datasets/coco_runner.yaml --device 0
+  -v "$(pwd)/datasets:/app/datasets:ro" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
+  cv_agent:latest --interaction auto run --device 0
 ```
 
 `device` in yaml: `auto` | `0` | `0,1,2,3` | `cpu`. CLI: `run --device 0,1,2,3`.
@@ -282,7 +280,7 @@ docker run -dit --gpus '"device=0"' --name cv_agent_train \
 | Mount / env | Purpose |
 |-------------|---------|
 | `-v .../runs:/app/runs` | Training artifacts, checkpoints, Optuna DB, `session_state.json` |
-| `-v .../datasets:/app/datasets` | Persist COCO / other Ultralytics auto-downloads (~20 GB for COCO) |
+| `-v .../datasets:/app/datasets:ro` | Reuse already downloaded COCO / custom datasets without container auto-downloads |
 | `-v .../cv_agent.local.yaml:...:ro` | **Optional** — only when the file exists; overrides selected keys |
 | `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
 | `-e CV_AGENT_LLM_KEY=...` | LLM key (preferred over putting secrets in local yaml) |
@@ -299,9 +297,12 @@ Uses **`cv_agent.yaml` by default**. Create **`cv_agent.local.yaml` only if** yo
 cp cv_agent.local.yaml.example cv_agent.local.yaml   # optional
 ```
 
-Example local override (secrets only):
+Example local override for a server with `./datasets/coco` already downloaded:
 
 ```yaml
+interaction_mode: auto
+data:
+  data_yaml: /app/coco_local.yaml
 llm:
   api_key: "sk-..."   # or: export CV_AGENT_LLM_KEY="sk-..."
 ```
