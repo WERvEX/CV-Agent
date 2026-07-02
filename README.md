@@ -12,6 +12,8 @@
 
 Run fully unattended (`auto`) on servers, or stay in the loop (`ask`) locally with diffs, confirmations, and guidance feedback.
 
+Command alias: `cvagent` and `cv_agent` are equivalent console scripts. This README keeps both visible where it matters; use whichever is easier in your shell.
+
 ---
 
 ## Table of Contents
@@ -122,7 +124,7 @@ pip install -e ".[dev]"
 Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 6 rounds.
 
 ```bash
-cv_agent run
+cvagent run
 ```
 
 On first run, Ultralytics **auto-downloads** `yolo26s.pt` (~20 MB) and COCO (~20 GB) into `datasets/`. If the default Ultralytics CDN is slow, **prefetch on the host** first (GitHub mirror):
@@ -152,7 +154,7 @@ bash scripts/prefetch_weights.sh
 Full COCO is the main time cost; switching `yolo26s` → `yolo26n` only helps modestly.
 
 ```bash
-cv_agent --config cv_agent.quick.yaml run
+cvagent --config cv_agent.quick.yaml run
 ```
 
 Docker (single GPU is enough for smoke test):
@@ -171,7 +173,7 @@ docker attach cv_agent_quick
 Or override flags on the default config:
 
 ```bash
-cv_agent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
+cvagent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
 ```
 
 Add `epochs_per_round: 5` in `cv_agent.local.yaml` for shorter smoke rounds (see example file).
@@ -350,7 +352,8 @@ Resume restores round number, hyperparameters, Optuna study, `red_streak`, and t
 ## CLI Reference
 
 ```
-cv_agent [--config PATH] [--interaction auto|ask] [--version] <command>
+cvagent [--config PATH] [--interaction auto|ask] [--version] <command>
+# `cv_agent` works the same way for every command.
 
 Commands:
   run               Start closed-loop training
@@ -367,7 +370,7 @@ Commands:
 | `--interaction auto\|ask` | Override interaction mode |
 | `--version` | Print version |
 
-### `cv_agent run`
+### `cvagent run` / `cv_agent run`
 
 | Option | Description |
 |--------|-------------|
@@ -424,6 +427,8 @@ Switch **Ask ↔ Auto per round** at the DECIDE checkpoint; choice persists in `
 
 Score is compared to the **historical best** each round (`delta_percent` and optional `delta_abs`).
 
+Green / Yellow / Red is a deterministic numeric classification from the rule controller, not an LLM judgment. The LLM can influence later proposals through bounded strategy patches and Ask-mode guidance, but it does not overwrite the measured round score used for rollback, checkpointing, or the decision timeline.
+
 | State | Condition (vs. best) | Typical action |
 |-------|----------------------|----------------|
 | **Green (hard)** | Δ% ≥ `green_threshold_pct` or Δ_abs ≥ `green_threshold_abs` | Commit checkpoint; Optuna Bayesian proposal |
@@ -432,7 +437,7 @@ Score is compared to the **historical best** each round (`delta_percent` and opt
 | **Red (soft)** | `soft_red_threshold_pct` ≥ Δ% > `red_threshold_pct` | Mild recovery **without** rollback |
 | **Red (hard)** | Δ% ≤ `red_threshold_pct` or Δ_abs ≤ `red_threshold_abs` | Rollback + rule recovery (overfit / underfit / general) |
 
-The **first round** is always Green (baseline).
+The **first round** establishes the run-local baseline and is auto-accepted without an interactive review. Official or published model metrics are useful external references, but they are not used as historical best because this loop needs apples-to-apples scores from the same dataset, epochs, device, and evaluation path.
 
 **Diagnostic routing:** overfitting or underfitting in Yellow / soft-Red triggers targeted mild adjustments instead of blind random-walk escape.
 
@@ -475,6 +480,8 @@ Legacy `search_strategy: random_walk|simulated_annealing` maps to Yellow escape 
 ## AI Strategy Planner
 
 The LLM strategy planner does not emit exact training hyperparameters. It emits bounded strategy patches: search-space narrowing, frozen fields, objective weights, and phase selection. Optuna still proposes precise numeric values inside those validated bounds, keeping numeric optimization auditable while using the LLM for diagnosis and strategy selection.
+
+Planner objective weights are logged as strategy context for Optuna and memory, but the decision score remains the raw training reward. This keeps rollback comparisons stable even when the strategy planner changes its weighting emphasis.
 
 Strategy runs persist `strategy_memory.json` for useful and avoid patterns across rounds, `strategy_log.json` for planner decisions, and the current `active_strategy_patch` in `session_state.json` so resumed experiments continue with the same constraints.
 
@@ -582,6 +589,7 @@ Settings load from **`cv_agent.yaml`** (tracked). If present, **`cv_agent.local.
 | `max_rounds` | `6` | Total rounds before stop |
 | `device` | `auto` | `auto` (all visible GPUs), `0`, `0,1,2,3`, or `cpu` |
 | `workers` | `8` (Linux) | DataLoader workers (`0` on Windows if unset) |
+| `model_verbose` | `false` | Set `true` only when you need full Ultralytics model/training detail output |
 | `interaction_mode` | `ask` | `ask` or `auto` |
 | `auto_prompt_seconds` | `10` | Auto mode countdown before approving a round |
 | `optimize_for_class` | `null` | Class name for weighted reward |
