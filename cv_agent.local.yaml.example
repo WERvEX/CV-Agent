@@ -1,26 +1,13 @@
-# Optional git-ignored overrides. Copy to cv_agent.local.yaml only if needed:
+# Optional git-ignored secret overrides. Copy only if needed:
 #   cp cv_agent.local.yaml.example cv_agent.local.yaml
 #
-# Default behavior: all settings come from cv_agent.yaml (tracked in git).
-# This file deep-merges on top — include ONLY keys you want to change.
-# No local file? cv_agent runs fine with cv_agent.yaml alone.
-
-# model_verbose: true  # opt in only when you need full Ultralytics model details
-
-# --- Secrets (recommended: use env var instead of this file) ---
+# Training profiles live in tracked YAML files:
+#   cv_agent.yaml        formal full-COCO training
+#   cv_agent.quick.yaml  COCO128 smoke test
+#
+# This file deep-merges on top of the selected profile. Keep it for secrets only.
+# Prefer environment variables on servers:
 #   export CV_AGENT_LLM_KEY="sk-..."
+
 llm:
   api_key: ""
-
-# --- Optional overrides (uncomment as needed) ---
-# interaction_mode: auto   # Docker / nohup / non-interactive servers
-# mlflow_uri: http://mlflow.internal:5000
-#
-# Docker/server smoke test with local COCO128 without Ultralytics auto-download:
-# mount host ./datasets to /app/datasets and use the bundled /app/coco128_local.yaml.
-# data:
-#   data_yaml: /app/coco128_local.yaml
-#
-# Formal full-COCO training:
-# leave data_yaml unset to use the default cv_agent.yaml, or set /app/coco_local.yaml
-# when ./datasets/coco is already downloaded and mounted.

@@ -162,9 +162,9 @@ Docker (single GPU is enough for smoke test):
 ```bash
 docker run -dit --gpus '"device=0"' --name cv_agent_quick \
   -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets" \
-  -v "$(pwd)/datasets:/datasets" \
+  -v "$(pwd)/datasets:/app/datasets:ro" \
   -v "$(pwd)/weights:/app/weights:ro" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
   -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
   cv_agent:latest --config cv_agent.quick.yaml run
 docker attach cv_agent_quick
@@ -176,7 +176,7 @@ Or override flags on the default config:
 cvagent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
 ```
 
-Add `epochs_per_round: 5` in `cv_agent.local.yaml` for shorter smoke rounds (see example file).
+Keep smoke-test settings in `cv_agent.quick.yaml`; keep `cv_agent.local.yaml` for local secrets only.
 
 ### Train on your dataset
 
@@ -220,7 +220,7 @@ cv_agent run --start from-checkpoint --checkpoint-id <ID>
 cp cv_agent.local.yaml.example cv_agent.local.yaml
 ```
 
-Typical local `cv_agent.local.yaml` tweaks: shorter smoke runs, Ask mode, dataset path.
+Keep `cv_agent.local.yaml` for secrets only. Use `cv_agent.quick.yaml` for smoke-test settings and `cv_agent.yaml` for formal training settings.
 
 After each round in Ask mode you can:
 
@@ -244,12 +244,12 @@ On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacent
 git clone <your-repo-url>
 cd cv_agent
 
-# Build image (bundles cv_agent.yaml, coco128_local.yaml, and coco_local.yaml)
+# Build image (bundles cv_agent.yaml, cv_agent.quick.yaml, and dataset examples)
 docker build -t cv_agent:latest .
 mkdir -p runs datasets
 ```
 
-**Config:** defaults come from **`cv_agent.yaml`** (inside the image) and target formal full-COCO training. Use `cv_agent.local.yaml` for smoke tests; set `data.data_yaml: /app/coco128_local.yaml` once and mount host `./datasets` to `/app/datasets`.
+**Config:** defaults come from **`cv_agent.yaml`** and target formal full-COCO training. Use **`cv_agent.quick.yaml`** for COCO128 smoke tests. Use **`cv_agent.local.yaml`** only for local secret overrides such as `llm.api_key`.
 
 **Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
 
@@ -297,17 +297,14 @@ Uses **`cv_agent.yaml` by default**. Create **`cv_agent.local.yaml` only if** yo
 cp cv_agent.local.yaml.example cv_agent.local.yaml   # optional
 ```
 
-Example local override for COCO128 smoke tests:
+Example local secret override:
 
 ```yaml
-interaction_mode: auto
-data:
-  data_yaml: /app/coco128_local.yaml
 llm:
   api_key: "sk-..."   # or: export CV_AGENT_LLM_KEY="sk-..."
 ```
 
-For formal full-COCO training, either do not mount `cv_agent.local.yaml`, or change `data_yaml` to `/app/coco_local.yaml` when `./datasets/coco` is already downloaded and mounted.
+For smoke tests, pass `--config cv_agent.quick.yaml`. For formal full-COCO training, use the default `cv_agent.yaml`.
 
 ### 2. Set secrets via environment (recommended on servers)
 

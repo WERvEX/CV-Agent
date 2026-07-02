@@ -2,8 +2,8 @@
 # All values can be overridden via CLI flags or environment variables.
 
 model_variant: yolo26s
-epochs_per_round: 50   # COCO: ~50 epochs per closed-loop round
-max_rounds: 6          # 6 rounds × 50 epochs ≈ one full hyperparameter search cycle
+epochs_per_round: 50 # COCO: ~50 epochs per closed-loop round
+max_rounds: 6 # 6 rounds × 50 epochs ≈ one full hyperparameter search cycle
 interaction_mode: ask # use --interaction auto on Docker/nohup, or override in cv_agent.local.yaml
 auto_prompt_seconds: 10
 
@@ -11,8 +11,8 @@ auto_prompt_seconds: 10
 # Docker: --gpus '"device=0,1,2,3"' --shm-size=8g  (NCCL needs large /dev/shm)
 # Override: device: "0" (single) | "0,1,2,3" (explicit DDP) | cpu
 device: auto
-workers: 8             # DataLoader workers (Linux); use 0 on Windows if needed
-model_verbose: false   # true prints full Ultralytics model/training details
+workers: 8 # DataLoader workers (Linux); use 0 on Windows if needed
+model_verbose: false # true prints full Ultralytics model/training details
 
 # Set a class name to prioritize its mAP@0.5 in the reward function (3x weight)
 optimize_for_class: null # e.g., "vehicle", "person"
@@ -28,7 +28,7 @@ data:
 initial_hyperparams:
   lr0: 0.01
   lrf: 0.01
-  batch: 64          # total batch across GPUs (e.g. 16/GPU × 4); lower to 32 or 16 if OOM
+  batch: 64 # total batch across GPUs (e.g. 16/GPU × 4); lower to 32 or 16 if OOM
   momentum: 0.937
   weight_decay: 0.0005
   warmup_epochs: 3.0

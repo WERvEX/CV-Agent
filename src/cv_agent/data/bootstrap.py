@@ -34,6 +34,90 @@ ULTRALYTICS_REGISTRY_NAMES = frozenset(
 DEFAULT_DATASETS_DIR = Path("datasets")
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+_GENERATED_DATASET_DIR = Path(".cv_agent_datasets")
+
+_COCO_NAMES = {
+    0: "person",
+    1: "bicycle",
+    2: "car",
+    3: "motorcycle",
+    4: "airplane",
+    5: "bus",
+    6: "train",
+    7: "truck",
+    8: "boat",
+    9: "traffic light",
+    10: "fire hydrant",
+    11: "stop sign",
+    12: "parking meter",
+    13: "bench",
+    14: "bird",
+    15: "cat",
+    16: "dog",
+    17: "horse",
+    18: "sheep",
+    19: "cow",
+    20: "elephant",
+    21: "bear",
+    22: "zebra",
+    23: "giraffe",
+    24: "backpack",
+    25: "umbrella",
+    26: "handbag",
+    27: "tie",
+    28: "suitcase",
+    29: "frisbee",
+    30: "skis",
+    31: "snowboard",
+    32: "sports ball",
+    33: "kite",
+    34: "baseball bat",
+    35: "baseball glove",
+    36: "skateboard",
+    37: "surfboard",
+    38: "tennis racket",
+    39: "bottle",
+    40: "wine glass",
+    41: "cup",
+    42: "fork",
+    43: "knife",
+    44: "spoon",
+    45: "bowl",
+    46: "banana",
+    47: "apple",
+    48: "sandwich",
+    49: "orange",
+    50: "broccoli",
+    51: "carrot",
+    52: "hot dog",
+    53: "pizza",
+    54: "donut",
+    55: "cake",
+    56: "chair",
+    57: "couch",
+    58: "potted plant",
+    59: "bed",
+    60: "dining table",
+    61: "toilet",
+    62: "tv",
+    63: "laptop",
+    64: "mouse",
+    65: "remote",
+    66: "keyboard",
+    67: "cell phone",
+    68: "microwave",
+    69: "oven",
+    70: "toaster",
+    71: "sink",
+    72: "refrigerator",
+    73: "book",
+    74: "clock",
+    75: "vase",
+    76: "scissors",
+    77: "teddy bear",
+    78: "hair drier",
+    79: "toothbrush",
+}
 
 
 def _set_ultralytics_datasets_dir(datasets_dir: Path) -> None:
@@ -56,6 +140,52 @@ def _find_registry_yaml(dataset_name: str, datasets_dir: Path) -> Path | None:
             if candidate.is_file() and yaml_has_images(candidate):
                 return candidate.resolve()
     return None
+
+
+def _registry_dataset_info(dataset_name: str, dataset_root: Path) -> dict | None:
+    name = dataset_name if dataset_name.endswith(".yaml") else f"{dataset_name}.yaml"
+    if name == COCO128_DATASET:
+        return {
+            "path": str(dataset_root.resolve()),
+            "train": "images/train2017",
+            "val": "images/train2017",
+            "names": _COCO_NAMES,
+        }
+    if name == COCO_DATASET:
+        return {
+            "path": str(dataset_root.resolve()),
+            "train": "train2017.txt",
+            "val": "val2017.txt",
+            "test": "test-dev2017.txt",
+            "names": _COCO_NAMES,
+        }
+    return None
+
+
+def _find_local_registry_dataset(dataset_name: str, datasets_dir: Path) -> Path | None:
+    """Generate a small YAML for an already-mounted COCO/COCO128 dataset."""
+    name = dataset_name if dataset_name.endswith(".yaml") else f"{dataset_name}.yaml"
+    stem = Path(name).stem
+    for root in candidate_datasets_dirs(datasets_dir):
+        dataset_root = root / stem
+        info = _registry_dataset_info(name, dataset_root)
+        if info is None or not dataset_root.exists():
+            continue
+        if _split_image_count(info, dataset_root, "train") == 0 and _split_image_count(info, dataset_root, "val") == 0:
+            continue
+        _GENERATED_DATASET_DIR.mkdir(parents=True, exist_ok=True)
+        generated = _GENERATED_DATASET_DIR / name
+        generated.write_text(yaml.safe_dump(info, sort_keys=False), encoding="utf-8")
+        log_success(f"Dataset ready: {generated.resolve()} -> {dataset_root.resolve()}")
+        return generated.resolve()
+    return None
+
+
+def _resolve_registry_yaml(dataset_name: str, datasets_dir: Path) -> Path | None:
+    located = _find_registry_yaml(dataset_name, datasets_dir)
+    if located is not None:
+        return located
+    return _find_local_registry_dataset(dataset_name, datasets_dir)
 
 
 def _resolve_dataset_root(yaml_path: Path, dataset_info: dict) -> Path:
@@ -148,7 +278,7 @@ def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> 
 
     if data_yaml.exists() and yaml_has_images(data_yaml):
         if registry := _registry_name_for(data_yaml):
-            located = _find_registry_yaml(registry, target_dir)
+            located = _resolve_registry_yaml(registry, target_dir)
             if located is not None:
                 return located
         return data_yaml.resolve()
@@ -156,7 +286,7 @@ def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> 
     if data_yaml.exists() and not yaml_has_images(data_yaml):
         log_warning(f"Dataset YAML found but no images on disk: {data_yaml}")
         # Bundled registry YAML (e.g. /app/coco128.yaml) — prefer downloaded copy under datasets_dir.
-        located = _find_registry_yaml(data_yaml.name, target_dir)
+        located = _resolve_registry_yaml(data_yaml.name, target_dir)
         if located is not None:
             log_success(f"Dataset ready: {located}")
             return located
@@ -168,6 +298,9 @@ def ensure_dataset(data_yaml: Path | None, datasets_dir: Path | None = None) -> 
     if registry or not data_yaml.exists():
         if not data_yaml.exists():
             log_warning(f"Dataset YAML not found at {data_yaml} — downloading {download_name}.")
+        located = _resolve_registry_yaml(download_name, target_dir)
+        if located is not None:
+            return located
         resolved = _download_registry_dataset(target_dir, download_name)
         if resolved is not None:
             log_success(f"Dataset ready: {resolved}")

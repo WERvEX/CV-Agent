@@ -87,6 +87,7 @@ optuna_study.db-journal
 # Supplemented / downloaded datasets (generated, not source)
 supplemented_data/
 datasets/
+.cv_agent_datasets/
 
 # Local secrets & per-user config (keep example cv_agent.yaml tracked)
 .env
