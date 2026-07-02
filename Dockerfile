@@ -4,7 +4,7 @@ FROM ultralytics/ultralytics:latest
 
 WORKDIR /app
 
-COPY pyproject.toml README.md cv_agent.yaml cv_agent.quick.yaml coco128.yaml coco_local.yaml dataset.yaml.example ./
+COPY pyproject.toml README.md cv_agent.yaml cv_agent.quick.yaml coco128.yaml coco128_local.yaml coco_local.yaml dataset.yaml.example ./
 COPY src/ src/
 RUN pip install --no-cache-dir -e .
 

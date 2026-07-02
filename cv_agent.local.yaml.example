@@ -16,7 +16,11 @@ llm:
 # interaction_mode: auto   # Docker / nohup / non-interactive servers
 # mlflow_uri: http://mlflow.internal:5000
 #
-# Docker/server COCO without Ultralytics auto-download:
-# mount host ./datasets to /app/datasets and use the bundled /app/coco_local.yaml.
+# Docker/server smoke test with local COCO128 without Ultralytics auto-download:
+# mount host ./datasets to /app/datasets and use the bundled /app/coco128_local.yaml.
 # data:
-#   data_yaml: /app/coco_local.yaml
+#   data_yaml: /app/coco128_local.yaml
+#
+# Formal full-COCO training:
+# leave data_yaml unset to use the default cv_agent.yaml, or set /app/coco_local.yaml
+# when ./datasets/coco is already downloaded and mounted.

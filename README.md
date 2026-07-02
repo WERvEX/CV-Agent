@@ -244,12 +244,12 @@ On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacent
 git clone <your-repo-url>
 cd cv_agent
 
-# Build image (bundles cv_agent.yaml and coco_local.yaml; local overrides are optional)
+# Build image (bundles cv_agent.yaml, coco128_local.yaml, and coco_local.yaml)
 docker build -t cv_agent:latest .
 mkdir -p runs datasets
 ```
 
-**Config:** defaults come from **`cv_agent.yaml`** (inside the image). For server COCO runs with an already downloaded `./datasets/coco`, set `data.data_yaml: /app/coco_local.yaml` once in `cv_agent.local.yaml` and mount that file.
+**Config:** defaults come from **`cv_agent.yaml`** (inside the image) and target formal full-COCO training. Use `cv_agent.local.yaml` for smoke tests; set `data.data_yaml: /app/coco128_local.yaml` once and mount host `./datasets` to `/app/datasets`.
 
 **Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
 
@@ -297,17 +297,17 @@ Uses **`cv_agent.yaml` by default**. Create **`cv_agent.local.yaml` only if** yo
 cp cv_agent.local.yaml.example cv_agent.local.yaml   # optional
 ```
 
-Example local override for a server with `./datasets/coco` already downloaded:
+Example local override for COCO128 smoke tests:
 
 ```yaml
 interaction_mode: auto
 data:
-  data_yaml: /app/coco_local.yaml
+  data_yaml: /app/coco128_local.yaml
 llm:
   api_key: "sk-..."   # or: export CV_AGENT_LLM_KEY="sk-..."
 ```
 
-For non-interactive servers, pass `--interaction auto` or uncomment `interaction_mode: auto` in local yaml.
+For formal full-COCO training, either do not mount `cv_agent.local.yaml`, or change `data_yaml` to `/app/coco_local.yaml` when `./datasets/coco` is already downloaded and mounted.
 
 ### 2. Set secrets via environment (recommended on servers)
 
