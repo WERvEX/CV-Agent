@@ -94,6 +94,7 @@ datasets/
 .env.*
 *.local.yaml
 secrets.yaml
+servercmd.md
 Ultralytics/
 
 # ─────────────────────────────────────────────────────────────

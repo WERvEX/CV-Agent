@@ -154,9 +154,9 @@ def _registry_dataset_info(dataset_name: str, dataset_root: Path) -> dict | None
     if name == COCO_DATASET:
         return {
             "path": str(dataset_root.resolve()),
-            "train": "train2017.txt",
-            "val": "val2017.txt",
-            "test": "test-dev2017.txt",
+            "train": "images/train2017",
+            "val": "images/val2017",
+            "test": "images/test2017",
             "names": _COCO_NAMES,
         }
     return None

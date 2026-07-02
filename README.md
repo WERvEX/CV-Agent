@@ -253,6 +253,33 @@ mkdir -p runs datasets
 
 **Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
 
+After pulling code changes, rebuild the image before starting a new container:
+
+```bash
+git pull
+docker build -t cv_agent:latest .
+```
+
+If a prior container name is already in use, inspect it first and remove it if it is stopped or no longer needed:
+
+```bash
+docker ps -a --filter name=cv_agent
+docker logs --tail 80 cv_agent_train
+docker rm cv_agent_train
+```
+
+**COCO128 smoke test:**
+
+```bash
+docker run -dit --gpus '"device=0"' --ipc=host --name cv_agent_smoke \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets:ro" \
+  -v "$(pwd)/weights:/app/weights:ro" \
+  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
+  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
+  cv_agent:latest --config cv_agent.quick.yaml run --device 0
+```
+
 ```bash
 docker run -dit --gpus '"device=0,1,2,3"' --ipc=host --name cv_agent_train \
   -v "$(pwd)/runs:/app/runs" \
@@ -264,6 +291,16 @@ docker run -dit --gpus '"device=0,1,2,3"' --ipc=host --name cv_agent_train \
 ```
 
 If NCCL still fails, try `--ipc=host` instead of/in addition to `--shm-size=8g`.
+
+Monitor or attach:
+
+```bash
+docker logs -f cv_agent_smoke
+docker logs -f cv_agent_train
+docker attach cv_agent_train
+```
+
+When attached, detach without stopping the job with `Ctrl-p`, then `Ctrl-q`.
 
 **Single GPU:**
 

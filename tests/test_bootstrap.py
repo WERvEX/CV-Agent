@@ -109,8 +109,10 @@ def test_ensure_dataset_generates_local_coco_yaml_when_full_coco_is_mounted(tmp_
     datasets_dir = tmp_path / "datasets"
     coco = datasets_dir / "coco"
     (coco / "images" / "train2017").mkdir(parents=True)
-    (coco / "train2017.txt").write_text("images/train2017/a.jpg\n", encoding="utf-8")
-    (coco / "val2017.txt").write_text("images/train2017/a.jpg\n", encoding="utf-8")
+    (coco / "images" / "train2017" / "a.jpg").write_bytes(b"x")
+    (coco / "images" / "val2017").mkdir(parents=True)
+    (coco / "images" / "val2017" / "b.jpg").write_bytes(b"x")
+    (coco / "labels" / "train2017").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
 
     resolved = ensure_dataset(Path("coco.yaml"), datasets_dir=datasets_dir)
@@ -118,5 +120,5 @@ def test_ensure_dataset_generates_local_coco_yaml_when_full_coco_is_mounted(tmp_
     assert resolved == (tmp_path / ".cv_agent_datasets" / "coco.yaml").resolve()
     data = yaml.safe_load(resolved.read_text(encoding="utf-8"))
     assert data["path"] == str(coco.resolve())
-    assert data["train"] == "train2017.txt"
-    assert data["val"] == "val2017.txt"
+    assert data["train"] == "images/train2017"
+    assert data["val"] == "images/val2017"
