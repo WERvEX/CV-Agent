@@ -119,3 +119,31 @@ decision:
   marginal_green_use_optuna: false
   red_escalation_count: 3
   yellow_resets_red_count: true
+  dynamic_thresholds: true
+  phase_schedule:
+    exploration_until_pct: 0.34
+    exploitation_until_pct: 0.75
+  dynamic:
+    exploration:
+      green_threshold_pct: 3.0
+      green_threshold_abs: 0.010
+      soft_red_threshold_pct: -5.0
+      red_threshold_pct: -10.0
+      red_threshold_abs: -0.030
+    exploitation:
+      green_threshold_pct: 1.5
+      green_threshold_abs: 0.005
+      soft_red_threshold_pct: -3.0
+      red_threshold_pct: -6.0
+      red_threshold_abs: -0.020
+    convergence:
+      green_threshold_pct: 0.5
+      green_threshold_abs: 0.002
+      soft_red_threshold_pct: -1.5
+      red_threshold_pct: -3.0
+      red_threshold_abs: -0.010
+  recent_window: 3
+  use_recent_median: true
+  volatility_relaxation_enabled: true
+  high_volatility_abs: 0.010
+  high_volatility_red_relax_pct: 2.0

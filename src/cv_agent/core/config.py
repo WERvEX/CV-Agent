@@ -151,6 +151,55 @@ class OptunaConfig(BaseModel):
         return self.yellow_strategy
 
 
+class DecisionPhaseSchedule(BaseModel):
+    """Round-progress percentages used to choose dynamic decision phase."""
+
+    exploration_until_pct: float = Field(default=0.34, ge=0.0, le=1.0)
+    exploitation_until_pct: float = Field(default=0.75, ge=0.0, le=1.0)
+
+
+class DecisionPhaseThresholds(BaseModel):
+    """Decision thresholds for one training phase."""
+
+    green_threshold_pct: float
+    green_threshold_abs: float | None = None
+    soft_red_threshold_pct: float
+    red_threshold_pct: float
+    red_threshold_abs: float | None = None
+
+
+class DynamicDecisionThresholds(BaseModel):
+    """Dynamic phase thresholds and recent-performance guards."""
+
+    exploration: DecisionPhaseThresholds = Field(
+        default_factory=lambda: DecisionPhaseThresholds(
+            green_threshold_pct=3.0,
+            green_threshold_abs=0.010,
+            soft_red_threshold_pct=-5.0,
+            red_threshold_pct=-10.0,
+            red_threshold_abs=-0.030,
+        )
+    )
+    exploitation: DecisionPhaseThresholds = Field(
+        default_factory=lambda: DecisionPhaseThresholds(
+            green_threshold_pct=1.5,
+            green_threshold_abs=0.005,
+            soft_red_threshold_pct=-3.0,
+            red_threshold_pct=-6.0,
+            red_threshold_abs=-0.020,
+        )
+    )
+    convergence: DecisionPhaseThresholds = Field(
+        default_factory=lambda: DecisionPhaseThresholds(
+            green_threshold_pct=0.5,
+            green_threshold_abs=0.002,
+            soft_red_threshold_pct=-1.5,
+            red_threshold_pct=-3.0,
+            red_threshold_abs=-0.010,
+        )
+    )
+
+
 class DecisionConfig(BaseModel):
     """Three-state decision thresholds and escalation policy."""
 
@@ -163,6 +212,14 @@ class DecisionConfig(BaseModel):
     marginal_green_use_optuna: bool = False
     red_escalation_count: int = 3
     yellow_resets_red_count: bool = True
+    dynamic_thresholds: bool = False
+    phase_schedule: DecisionPhaseSchedule = Field(default_factory=DecisionPhaseSchedule)
+    dynamic: DynamicDecisionThresholds = Field(default_factory=DynamicDecisionThresholds)
+    recent_window: int = Field(default=3, ge=1)
+    use_recent_median: bool = True
+    volatility_relaxation_enabled: bool = True
+    high_volatility_abs: float = Field(default=0.010, ge=0.0)
+    high_volatility_red_relax_pct: float = Field(default=2.0, ge=0.0)
 
 
 class LLMConfig(BaseModel):

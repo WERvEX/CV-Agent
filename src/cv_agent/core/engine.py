@@ -615,6 +615,9 @@ class TrainingEngine:
         decision = self._decision_engine.decide(
             comparison=comparison,
             current_params=self._current_params,
+            round_num=self._round_num,
+            max_rounds=self._config.max_rounds,
+            history=self._history,
         )
         strategy_patch = self._plan_strategy(decision.to_dict())
         if strategy_patch is not None:

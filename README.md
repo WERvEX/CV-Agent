@@ -474,6 +474,8 @@ Green / Yellow / Red is a deterministic numeric classification from the rule con
 
 The **first round** establishes the run-local baseline and is auto-accepted without an interactive review. Official or published model metrics are useful external references, but they are not used as historical best because this loop needs apples-to-apples scores from the same dataset, epochs, device, and evaluation path.
 
+When `dynamic_thresholds: true`, the effective thresholds are selected by training progress (`round_num / max_rounds`): exploration until 34%, exploitation until 75%, then convergence. Early rounds tolerate larger drops; convergence accepts smaller gains and treats smaller drops as risky. Recent median and volatility guards reduce hard-Red overreaction when recent scores are noisy or the current round matches recent performance.
+
 **Diagnostic routing:** overfitting or underfitting in Yellow / soft-Red triggers targeted mild adjustments instead of blind random-walk escape.
 
 ### Red escalation (3× consecutive Reds)
@@ -660,6 +662,12 @@ Starting YOLO training args for round 1 (and fallback). Includes `lr0`, `lrf`, `
 | `marginal_green_use_optuna` | `false` | Run Optuna on marginal Green rounds |
 | `red_escalation_count` | `3` | Consecutive Reds before data-gap escalation |
 | `yellow_resets_red_count` | `true` | Yellow round resets Red streak |
+| `dynamic_thresholds` | `true` | Use progress-based exploration / exploitation / convergence thresholds |
+| `phase_schedule.*` | see yaml | Percent cutoffs based on `round_num / max_rounds` |
+| `dynamic.*` | see yaml | Per-phase Green / soft-Red / hard-Red thresholds |
+| `recent_window` | `3` | Number of recent scores for median and volatility guards |
+| `use_recent_median` | `true` | Downgrade hard Red to Yellow when current score matches recent median |
+| `volatility_relaxation_enabled` | `true` | Relax Red thresholds during noisy recent performance |
 
 ### `optuna`
 

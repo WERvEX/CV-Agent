@@ -202,6 +202,32 @@ def print_decision_recommendation(
     table.add_row("Action", str(action))
     table.add_row("Reason", reason)
 
+    metadata = decision.get("metadata") or {}
+    if isinstance(metadata, dict):
+        phase = metadata.get("decision_phase")
+        thresholds = metadata.get("effective_thresholds")
+        if phase and isinstance(thresholds, dict):
+            green = thresholds.get("green_threshold_pct")
+            soft_red = thresholds.get("soft_red_threshold_pct")
+            red = thresholds.get("red_threshold_pct")
+            table.add_row(
+                "Decision phase",
+                f"{phase} (green >= {green:+.2f}%, soft red <= {soft_red:+.2f}%, red <= {red:+.2f}%)",
+            )
+        recent_median = metadata.get("recent_median_score")
+        delta_recent = metadata.get("delta_vs_recent_median_pct")
+        if recent_median is not None and delta_recent is not None:
+            table.add_row(
+                "Recent median",
+                f"{float(recent_median):.4f} ({float(delta_recent):+.2f}% vs recent)",
+            )
+        volatility = metadata.get("recent_volatility")
+        if volatility is not None:
+            relaxed = " relaxed" if metadata.get("volatility_relaxed") else ""
+            table.add_row("Volatility", f"{float(volatility):.4f}{relaxed}")
+        if metadata.get("recent_median_guard"):
+            table.add_row("Guard", "Recent median prevented hard RED")
+
     if should_rollback:
         rollback_target = checkpoint_path or decision.get("rollback_checkpoint") or "best checkpoint"
         table.add_row("Rollback", f"[bold yellow]Yes[/bold yellow] → {rollback_target}")
