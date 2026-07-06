@@ -713,6 +713,15 @@ Starting YOLO training args for round 1 (and fallback). Includes `lr0`, `lrf`, `
 | `guidance_enabled` | `true` | Parse Ask-mode feedback via LLM |
 | `guidance_fallback_regex` | `true` | Fall back to regex if LLM fails |
 
+### `early_stop`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Stop after a round reaches the target metric |
+| `metric` | `score` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
+| `target` | `1.0` | Stop when metric value is greater than or equal to this value |
+| `save_best_on_stop` | `true` | Export the best known checkpoint to `final/best.pt` |
+
 ### Minimal config example
 
 ```yaml
@@ -737,6 +746,11 @@ optuna:
 
 llm:
   guidance_enabled: true
+
+early_stop:
+  enabled: true
+  metric: mAP50_class:car
+  target: 0.75
 ```
 
 > Ultralytics uses `optimizer=auto` so `lr0` scales appropriately for the chosen optimizer (e.g. AdamW vs SGD).

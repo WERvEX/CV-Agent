@@ -244,6 +244,15 @@ class LLMConfig(BaseModel):
         return v
 
 
+class EarlyStopConfig(BaseModel):
+    """Stop training once a configured evaluation metric reaches a target."""
+
+    enabled: bool = False
+    metric: str = "score"
+    target: float = Field(default=1.0, ge=0.0)
+    save_best_on_stop: bool = True
+
+
 class DataConfig(BaseModel):
     """Dataset configuration and validation thresholds."""
 
@@ -284,6 +293,7 @@ class TrainConfig(BaseModel):
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    early_stop: EarlyStopConfig = Field(default_factory=EarlyStopConfig)
     mlflow_uri: str = "http://localhost:5000"
     experiment_name: str = "cv_agent"
     output_root: Path = Path("runs")

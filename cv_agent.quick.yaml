@@ -100,6 +100,12 @@ llm:
   guidance_enabled: true
   guidance_fallback_regex: true
 
+early_stop:
+  enabled: false
+  metric: score # score | mAP50 | mAP50_95 | precision | recall | mAP50_class:<name-or-id>
+  target: 1.0
+  save_best_on_stop: true
+
 mlflow_uri: http://localhost:5000
 experiment_name: cv_agent_quick
 output_root: runs

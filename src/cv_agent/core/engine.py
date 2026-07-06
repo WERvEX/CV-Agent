@@ -57,6 +57,7 @@ from cv_agent.tracking.run_dir import (
     save_strategy_memory,
     snapshot_best_checkpoint,
 )
+from cv_agent.trainer.early_stop import EarlyStopDecision, evaluate_early_stop
 from cv_agent.trainer.evaluator import Evaluator, RoundResult, compute_weighted_score
 from cv_agent.trainer.yolo_trainer import YOLOTrainer
 from cv_agent.ui.console import (
@@ -156,6 +157,7 @@ class TrainingEngine:
         self._strategy_memory = None
         self._active_strategy_patch = None
         self._strategy_memory_baseline_score: float | None = None
+        self._early_stop_decision: EarlyStopDecision | None = None
         self._llm_context_accumulator: str = ""
         self._checkpoint_manager: CheckpointManager | None = None
         self._fork_weights: Path | None = None
@@ -216,6 +218,7 @@ class TrainingEngine:
             log_error(f"Fatal error: {e}")
             logger.exception("Fatal error traceback:")
         finally:
+            self._export_final_best_model()
             self._mlflow.end_session()
             self._print_summary()
 
@@ -324,6 +327,7 @@ class TrainingEngine:
             log_error(f"Fatal error: {e}")
             logger.exception("Fatal error traceback:")
         finally:
+            self._export_final_best_model()
             self._mlflow.end_session()
             self._print_summary()
 
@@ -581,6 +585,9 @@ class TrainingEngine:
             )
 
         self._maybe_record_top_checkpoint(round_result)
+        if self._check_early_stop(round_result):
+            self._state = TrainingLoopState.DONE
+            return
         self._state = TrainingLoopState.DECIDE
 
     def _metrics_with_strategy_penalties(
@@ -1203,6 +1210,85 @@ class TrainingEngine:
             round_num=round_result.round_num,
             hyperparams=self._current_params.model_dump(),
         )
+
+    def _check_early_stop(self, round_result: RoundResult) -> bool:
+        """Stop the loop if the configured early-stop metric reached its target."""
+        config = self._config
+        if config is None or not config.early_stop.enabled:
+            return False
+
+        decision = evaluate_early_stop(
+            config.early_stop,
+            round_result,
+            config.data.data_yaml,
+        )
+        self._early_stop_decision = decision
+        if not decision.reached:
+            log_info(f"Early stop check: {decision.reason}")
+            return False
+
+        log_success(f"Early stop target reached: {decision.reason}")
+        if config.early_stop.save_best_on_stop:
+            self._promote_round_checkpoint_if_best(round_result)
+            self._export_final_best_model()
+        self._save_session_state()
+        return True
+
+    def _promote_round_checkpoint_if_best(self, round_result: RoundResult) -> None:
+        """Snapshot this round's best.pt when it is the best known model."""
+        if self._run_dir is None:
+            return
+        if self._best_checkpoint is not None and self._best_checkpoint.exists():
+            if self._best_score >= round_result.score:
+                return
+        best_pt = self._run_dir / "weights" / "best.pt"
+        if not best_pt.exists():
+            return
+        self._best_checkpoint = snapshot_best_checkpoint(self._run_dir, round_result.round_num)
+        self._best_score = round_result.score
+        self._best_round = round_result.round_num
+
+    def _export_final_best_model(self) -> Path | None:
+        """Copy the best known checkpoint to final/best.pt with a small summary."""
+        if self._run_dir is None:
+            return None
+
+        source = self._best_checkpoint if self._best_checkpoint and self._best_checkpoint.exists() else None
+        if source is None:
+            for candidate in (
+                self._run_dir / "weights" / "best.pt",
+                self._run_dir / "weights" / "last.pt",
+            ):
+                if candidate.exists():
+                    source = candidate
+                    break
+        if source is None:
+            return None
+
+        final_dir = self._run_dir / "final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        dst = final_dir / "best.pt"
+        if source.resolve() != dst.resolve():
+            shutil.copy2(source, dst)
+
+        import json
+
+        summary = {
+            "best_round": self._best_round,
+            "best_score": self._best_score,
+            "rounds_completed": self._round_num,
+            "source_checkpoint": str(source),
+            "exported_checkpoint": str(dst),
+            "early_stop": (
+                self._early_stop_decision.__dict__
+                if self._early_stop_decision is not None
+                else None
+            ),
+        }
+        with open(final_dir / "summary.json", "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2, default=str, ensure_ascii=False)
+        log_info(f"Final best model exported to {dst}")
+        return dst
 
     def save_checkpoint_manual(self, name: str) -> Path | None:
         """Save current weights and hyperparameters under a user-chosen name."""
