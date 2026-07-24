@@ -206,6 +206,9 @@ cv_agent run
 # Explicit options
 cv_agent run --interaction ask --data-yaml dataset.yaml --model yolo26n --max-rounds 5
 
+# Stop once validation mAP50 reaches 75%, then export final/best.pt
+cv_agent run --early-stop --early-stop-metric mAP50 --early-stop-target 0.75
+
 # Resume the same experiment
 cv_agent resume --run-dir runs/exp_<timestamp>
 
@@ -417,6 +420,9 @@ Commands:
 | `--start fresh\|resume\|from-checkpoint` | Startup mode (skips wizard when set) |
 | `--run-dir PATH` | Experiment dir for `--start resume` |
 | `--checkpoint-id TEXT` | ID from `list-checkpoints` for `--start from-checkpoint` |
+| `--early-stop` | Enable stop-on-target and export the best model |
+| `--early-stop-metric TEXT` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
+| `--early-stop-target FLOAT` | Target in the inclusive range 0-1; also enables early stop |
 
 ### `cv_agent resume`
 
@@ -619,6 +625,8 @@ Settings load from **`cv_agent.yaml`** (tracked). If present, **`cv_agent.local.
 
 ### Training loop
 
+For early stopping, explicit CLI options take precedence over the interactive startup choice, followed by `cv_agent.local.yaml`, then `cv_agent.yaml`. Interactive choices apply only to the current run. Non-interactive runs never prompt and use the YAML/CLI values directly.
+
 | Key | Default | Description |
 |-----|---------|-------------|
 | `model_variant` | `yolo26s` | Ultralytics model slug |
@@ -718,9 +726,9 @@ Starting YOLO training args for round 1 (and fallback). Includes `lr0`, `lrf`, `
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `false` | Stop after a round reaches the target metric |
-| `metric` | `score` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
-| `target` | `1.0` | Stop when metric value is greater than or equal to this value |
-| `save_best_on_stop` | `true` | Export the best known checkpoint to `final/best.pt` |
+| `metric` | `mAP50` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
+| `target` | `1.0` | Stop when metric value is greater than or equal to this value (75% is `0.75`) |
+| `save_best_on_stop` | `true` | Export the best known checkpoint to `runs/exp_*/final/best.pt` and write `final/summary.json` |
 
 ### Minimal config example
 
