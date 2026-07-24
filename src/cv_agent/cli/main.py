@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 # Force unbuffered/line-buffered stdout BEFORE heavy imports, so Ultralytics'
 # tqdm/print flush in real time during training (not just when a buffer fills).
@@ -25,10 +26,8 @@ except (AttributeError, ValueError):
 import click
 import yaml
 
-from typing import Literal
-
 from cv_agent import __version__
-from cv_agent.core.config import TrainConfig
+from cv_agent.core.config import EarlyStopConfig, TrainConfig
 from cv_agent.ui.console import log_error, log_info, log_success, log_warning, print_banner
 
 
@@ -50,6 +49,95 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def _build_data_yaml_override(resolved_data_yaml: Path) -> dict:
     """Build the run-command data override without clobbering local thresholds."""
     return {"data_yaml": resolved_data_yaml}
+
+
+def _validate_early_stop_metric(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: str | None,
+) -> str | None:
+    """Reject invalid early-stop metrics before dataset setup or training starts."""
+    if value is None:
+        return None
+    try:
+        return EarlyStopConfig(metric=value).metric
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+_EARLY_STOP_METRIC_CHOICES = [
+    ("mAP50", "mAP@0.5 (recommended)"),
+    ("mAP50_95", "mAP@0.5:0.95"),
+    ("precision", "Precision"),
+    ("recall", "Recall"),
+    ("score", "Composite training score"),
+    ("mAP50_class", "mAP@0.5 for a specific class"),
+]
+
+
+def _build_early_stop_override(
+    enabled: bool | None,
+    metric: str | None,
+    target: float | None,
+) -> dict:
+    """Build a nested early-stop override from optional CLI arguments."""
+    if enabled is None and metric is None and target is None:
+        return {}
+
+    early_stop: dict[str, bool | str | float] = {}
+    if enabled is not None:
+        early_stop["enabled"] = enabled
+    if metric is not None:
+        early_stop["metric"] = metric
+    if target is not None:
+        early_stop["target"] = target
+    if metric is not None or target is not None:
+        early_stop["enabled"] = True
+    return {"early_stop": early_stop}
+
+
+def _prompt_early_stop_override(default: EarlyStopConfig) -> dict | None:
+    """Collect a per-run early-stop override when stdin is interactive."""
+    if not sys.stdin.isatty():
+        return None
+
+    from cv_agent.ui.prompts import confirm, select_action, text
+
+    enabled = confirm(
+        "Stop training and save the best model when a target metric is reached?",
+        default=default.enabled,
+    )
+    if not enabled:
+        return {"early_stop": {"enabled": False}}
+
+    selected_metric = default.metric
+    default_key = selected_metric if selected_metric in dict(_EARLY_STOP_METRIC_CHOICES) else "mAP50_class"
+    metric = select_action(
+        "Choose the early-stop metric:",
+        _EARLY_STOP_METRIC_CHOICES,
+        default_key=default_key,
+    )
+    if metric == "mAP50_class":
+        class_ref = text(
+            "Class name or ID for mAP@0.5:",
+            default=selected_metric.split(":", 1)[1] if ":" in selected_metric else "",
+        ).strip()
+        if not class_ref:
+            log_warning("A class name or ID is required for class-specific mAP50; using mAP50 instead.")
+            metric = "mAP50"
+        else:
+            metric = f"mAP50_class:{class_ref}"
+
+    while True:
+        raw_target = text("Target value (0 to 1):", default=f"{default.target:g}").strip()
+        try:
+            target = float(raw_target)
+        except ValueError:
+            log_warning("Target must be a number from 0 to 1.")
+            continue
+        if 0.0 <= target <= 1.0:
+            return {"early_stop": {"enabled": True, "metric": metric, "target": target}}
+        log_warning("Target must be between 0 and 1.")
 
 
 def _load_config(config_path: Path, cli_overrides: dict) -> TrainConfig:
@@ -304,6 +392,12 @@ def cli(ctx: click.Context, config: Path, interaction: str | None) -> None:
               help="Checkpoint id for --start from-checkpoint (see list-checkpoints).")
 @click.option("--device", type=str, default=None,
               help="CUDA device(s): auto, cpu, 0, or 0,1,2,3 (DDP). Overrides config.")
+@click.option("--early-stop", is_flag=True, default=None,
+              help="Stop after a target metric is reached and save the best model.")
+@click.option("--early-stop-metric", type=str, default=None, callback=_validate_early_stop_metric,
+              help="Target metric: score, mAP50, mAP50_95, precision, recall, or mAP50_class:<name-or-id>.")
+@click.option("--early-stop-target", type=click.FloatRange(0.0, 1.0), default=None,
+              help="Target metric value from 0 to 1; also enables early stopping.")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -315,6 +409,9 @@ def run(
     run_dir: Path | None,
     checkpoint_id: str | None,
     device: str | None,
+    early_stop: bool | None,
+    early_stop_metric: str | None,
+    early_stop_target: float | None,
 ) -> None:
     """Start automated closed-loop training.
 
@@ -342,12 +439,24 @@ def run(
         overrides["model_variant"] = model
     if device:
         overrides["device"] = device
+    overrides = _deep_merge(
+        overrides,
+        _build_early_stop_override(early_stop, early_stop_metric, early_stop_target),
+    )
 
     base_config = _load_config(ctx.obj["config_path"], overrides)
     interaction_mode = _prompt_interaction_mode(
         base_config.interaction_mode,
         ctx.obj.get("interaction_override"),
     )
+    has_early_stop_cli_override = any(
+        value is not None for value in (early_stop, early_stop_metric, early_stop_target)
+    )
+    if not has_early_stop_cli_override:
+        interactive_override = _prompt_early_stop_override(base_config.early_stop)
+        if interactive_override is not None:
+            overrides = _deep_merge(overrides, interactive_override)
+            base_config = _load_config(ctx.obj["config_path"], overrides)
     config = base_config.model_copy(update={"interaction_mode": interaction_mode})
 
     log_info(f"Configuration loaded: model={config.model_variant}, "
@@ -356,6 +465,14 @@ def run(
 
     if config.optimize_for_class:
         log_info(f"Optimizing for class: [bold cyan]{config.optimize_for_class}[/bold cyan]")
+
+    if config.early_stop.enabled:
+        log_info(
+            f"Early stop: {config.early_stop.metric} >= {config.early_stop.target:g}; "
+            "best model will be exported to <run_dir>/final/best.pt."
+        )
+    else:
+        log_info("Early stop: disabled.")
 
     start_mode, resume_dir, ckpt_id = _prompt_start_mode(
         config,

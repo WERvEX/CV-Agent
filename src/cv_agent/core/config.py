@@ -248,9 +248,32 @@ class EarlyStopConfig(BaseModel):
     """Stop training once a configured evaluation metric reaches a target."""
 
     enabled: bool = False
-    metric: str = "score"
-    target: float = Field(default=1.0, ge=0.0)
+    metric: str = "mAP50"
+    target: float = Field(default=1.0, ge=0.0, le=1.0)
     save_best_on_stop: bool = True
+
+    @field_validator("metric")
+    @classmethod
+    def validate_metric(cls, value: str) -> str:
+        """Normalize and validate metrics supported by early stopping."""
+        metric = value.strip()
+        normalized = metric.lower()
+        canonical_metrics = {
+            "score": "score",
+            "map50": "mAP50",
+            "map50_95": "mAP50_95",
+            "map50-95": "mAP50_95",
+            "precision": "precision",
+            "recall": "recall",
+        }
+        if normalized in canonical_metrics:
+            return canonical_metrics[normalized]
+        if normalized.startswith("map50_class:") and metric.split(":", 1)[1].strip():
+            return f"mAP50_class:{metric.split(':', 1)[1].strip()}"
+        raise ValueError(
+            "must be score, mAP50, mAP50_95, precision, recall, "
+            "or mAP50_class:<name-or-id>"
+        )
 
 
 class DataConfig(BaseModel):

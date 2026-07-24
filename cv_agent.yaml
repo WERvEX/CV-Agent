@@ -110,7 +110,7 @@ llm:
 
 early_stop:
   enabled: false
-  metric: score # score | mAP50 | mAP50_95 | precision | recall | mAP50_class:<name-or-id>
+  metric: mAP50 # score | mAP50 | mAP50_95 | precision | recall | mAP50_class:<name-or-id>
   target: 1.0
   save_best_on_stop: true
 
