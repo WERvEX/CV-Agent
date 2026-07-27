@@ -1,848 +1,298 @@
 # cv_agent
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Ultralytics](https://img.shields.io/badge/Ultralytics-YOLO-orange.svg)](https://github.com/ultralytics/ultralytics)
-[![Optuna](https://img.shields.io/badge/Optuna-hyperparameter%20search-green.svg)](https://optuna.org/)
-[![MLflow](https://img.shields.io/badge/MLflow-tracking-blue.svg)](https://mlflow.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./pyproject.toml)
 
-**Automated closed-loop YOLO object-detection training.**
+[中文文档](./README.zh-CN.md)
 
-`cv_agent` runs repeated training rounds: validate data → train → evaluate → classify the outcome (Green / Yellow / Red) → propose next hyperparameters → repeat. [Optuna](https://optuna.org/) drives hyperparameter search; a rule-based controller handles checkpoint commits, rollbacks, and local-optimum escape. An optional LLM parses natural-language guidance in **Ask mode**, and assists with data-gap analysis after repeated failures.
+`cv_agent` is a command-line agent for iterative YOLO object-detection training. It validates a dataset, trains and evaluates a model, decides how the round performed, proposes the next hyperparameters, and repeats—all while preserving experiment state and artifacts.
 
-Run fully unattended (`auto`) on servers, or stay in the loop (`ask`) locally with diffs, confirmations, and guidance feedback.
+It is intended for experiments where a single `yolo train` invocation is not enough: you want controlled iteration, reproducible decisions, checkpoints, and a way to resume or branch an experiment.
 
-Command alias: `cvagent` and `cv_agent` are equivalent console scripts. This README keeps both visible where it matters; use whichever is easier in your shell.
+## What it does
 
----
-
-## Table of Contents
-
-- [Features](#features)
-- [How It Works](#how-it-works)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Running Locally](#running-locally)
-- [Running on a Server](#running-on-a-server)
-  - [Docker (recommended)](#docker-recommended)
-- [CLI Reference](#cli-reference)
-- [Interaction Modes](#interaction-modes)
-- [Decision System](#decision-system)
-- [Hyperparameter Optimization](#hyperparameter-optimization)
-- [AI Strategy Planner](#ai-strategy-planner)
-- [Checkpoints & Resume](#checkpoints--resume)
-- [Model Weights & Export](#model-weights--export)
-- [Dataset Validation & Supplement](#dataset-validation--supplement)
-- [Single-Class Optimization](#single-class-optimization)
-- [Configuration Reference](#configuration-reference)
-- [LLM Integration](#llm-integration)
-- [MLflow Tracking](#mlflow-tracking)
-- [Project Layout](#project-layout)
-- [Development](#development)
-- [Security](#security)
-- [License](#license)
-
----
-
-## Features
-
-- **Closed-loop training** — multi-round train → evaluate → decide without manual scripting
-- **Tiered decisions** — hard/marginal Green, diagnostic Yellow, soft/hard Red with overfit/underfit-aware recovery
-- **Optuna integration** — TPE Bayesian on Green; random walk / simulated annealing / Bayesian on Yellow
-- **Ask-mode LLM guidance** — natural-language feedback (e.g. “lr 稍微大一点”) parsed into param constraints with a visible diff before the next round
-- **Per-class metrics** — compact per-class mAP summary after validation enrichment
-- **Checkpoint management** — Top-N leaderboard, per-round snapshots, manual named saves, resume & fork
-- **Dataset validation** — image/label checks, class counts, object size, optional quality heuristics
-- **Data supplement mode** — helper scripts when data is insufficient or after 3× Red escalation
-- **Ask or Auto** — human-in-the-loop with param diffs, or hands-off overnight runs
-- **MLflow logging** — remote server or transparent local fallback
-- **Resume persistence** — `session_state.json` stores round, hyperparameters, `red_streak`, and Optuna trial budget
-
----
-
-## How It Works
-
-Each **round** trains for `epochs_per_round` epochs, then evaluates against the historical best score:
-
-```
-VALIDATE → TRAIN → EVALUATE → DECIDE → (next round)
-                              ↓
-                    Green / Yellow / Red
-                              ↓
-              Optuna proposal + rule recovery
-                              ↓
-              Ask review / Auto approve → apply params
+```text
+validate data → train a round → evaluate → decide → adjust → next round
+                                      │
+                         Green / Yellow / Red
 ```
 
-| Component | Responsibility |
-|-----------|----------------|
-| `TrainingEngine` | Main loop, round lifecycle, artifact I/O |
-| `ThreeStateDecisionEngine` | Tiered Green / Yellow / Red classification |
-| `OptunaOptimizer` | Next-round hyperparameter proposals |
-| `LLMAdvisor` | Ask-mode guidance parsing; Red×3 data-gap analysis |
-| `CheckpointManager` | Top-N saves, manual saves, fork metadata |
-| `Evaluator` | mAP scoring, overfit/underfit detection, per-class metrics |
-
-**Reward score** defaults to global mAP@0.5; with `--optimize-for`, a weighted blend favors one class (see [Single-Class Optimization](#single-class-optimization)).
-
----
+- Runs YOLO training in rounds rather than as one opaque job.
+- Scores each round using validation metrics, with optional emphasis on one class.
+- Uses rule-based Green / Yellow / Red decisions for checkpointing, recovery, and local-optimum escape.
+- Uses Optuna to propose bounded hyperparameter changes.
+- Supports interactive review (`ask`) and unattended execution (`auto`).
+- Keeps Top-N and manual checkpoints; supports resume and fork-from-checkpoint workflows.
+- Validates datasets before training and produces a data-gap report after repeated failures.
+- Logs locally and to MLflow when available; an unreachable HTTP MLflow server falls back to `./mlruns`.
+- Optionally uses an OpenAI-compatible LLM endpoint for Ask-mode guidance and data-gap analysis. No API key is required for the core loop.
 
 ## Requirements
 
-- **Python** 3.10+
-- **PyTorch** + **Ultralytics YOLO** (GPU recommended)
-- **MLflow server** — optional (`./mlruns` fallback)
-- **LLM API key** — optional (regex guidance + heuristic fallback work without it)
+- Python 3.10 or later.
+- PyTorch compatible with the target CPU/GPU and CUDA installation.
+- An Ultralytics-compatible environment. A CUDA GPU is strongly recommended for practical training.
+- Docker with NVIDIA Container Toolkit only if you choose the Docker workflow.
 
-The CLI checks that `torch` and `ultralytics` are importable at startup. Use a dedicated conda/venv with those packages installed.
+The project declares its Python dependencies in `pyproject.toml`, including Ultralytics, PyTorch, Optuna, MLflow, and Rich.
 
----
-
-## Installation
+## Install
 
 ```bash
-git clone <your-repo-url>
+git clone <repository-url>
 cd cv_agent
 
-conda activate <your-yolo-env>   # e.g. a env with torch + ultralytics
+# Activate an environment that has the appropriate PyTorch build for your hardware.
+python -m pip install -e .
 
-pip install -e .
-
-# Optional: dev tools
-pip install -e ".[dev]"
+# Optional developer dependencies
+python -m pip install -e ".[dev]"
 ```
 
-**Server (Docker)** — see [Docker (recommended)](#docker-recommended) under [Running on a Server](#running-on-a-server).
-
----
-
-## Quick Start
-
-### First run (full COCO)
-
-Defaults in `cv_agent.yaml` target **formal training**: `yolo26s` on full **COCO** (`coco.yaml`), 50 epochs/round × 6 rounds.
+Both commands below invoke the same CLI:
 
 ```bash
-cvagent run
+cv_agent --help
+cvagent --help
 ```
 
-On first run, Ultralytics **auto-downloads** `yolo26s.pt` (~20 MB) and COCO (~20 GB) into `datasets/`. If the default Ultralytics CDN is slow, **prefetch on the host** first (GitHub mirror):
+## Quick start
+
+The tracked profiles serve different purposes:
+
+| Profile | Purpose | Dataset | Default model |
+| --- | --- | --- | --- |
+| `cv_agent.quick.yaml` | Smoke-test the complete loop | COCO128 | `yolo26n` |
+| `cv_agent.yaml` | Longer formal experiments | COCO | `yolo26s` |
+
+Start with the quick profile. If the configured Ultralytics registry dataset is absent, `cv_agent` asks Ultralytics to bootstrap it; the initial download can take time and needs network access.
 
 ```bash
-bash scripts/prefetch_coco.sh                    # default: GitHub mirror for labels
-LABEL_MIRROR=ghfast bash scripts/prefetch_coco.sh   # China-friendly GitHub proxy
-SKIP_IMAGES=1 bash scripts/prefetch_coco.sh      # labels only (~168 MB), then images later
+cv_agent --config cv_agent.quick.yaml run
 ```
 
-Files land in `./datasets/`; Docker mount `-v "$(pwd)/datasets:/app/datasets"` reuses them.
+To run against your own dataset, first create a YOLO dataset YAML. `dataset.yaml.example` is a starting point.
 
-**Model weights:** Ultralytics downloads pretrained `.pt` on first train. Prefetch on the host (includes `yolo26n.pt` for AMP checks — **not** your training model):
+```yaml
+path: /absolute/path/to/dataset
+train: images/train
+val: images/val
+names:
+  0: class_a
+  1: class_b
+```
+
+Then launch a bounded experiment:
 
 ```bash
-bash scripts/prefetch_weights.sh
-# Docker: also mount -v "$(pwd)/weights/yolo26n.pt:/app/yolo26n.pt:ro" etc.
+cv_agent run \
+  --data-yaml /absolute/path/to/dataset.yaml \
+  --model yolo26n \
+  --max-rounds 5
 ```
 
-**Quick functional test** (~minutes, not hours) — use bundled `cv_agent.quick.yaml`:
-
-| Profile | Dataset | Model | Epochs/round | Rounds | ~Train steps/epoch |
-|---------|---------|-------|--------------|--------|-------------------|
-| `cv_agent.quick.yaml` | COCO128 (128 img) | yolo26n | 5 | 3 | 8 |
-| `cv_agent.yaml` (default) | COCO (~118k img) | yolo26s | 50 | 6 | ~1849 |
-
-Full COCO is the main time cost; switching `yolo26s` → `yolo26n` only helps modestly.
+Validate a dataset without training:
 
 ```bash
-cvagent --config cv_agent.quick.yaml run
+cv_agent validate --data-yaml /absolute/path/to/dataset.yaml
 ```
 
-Docker (single GPU is enough for smoke test):
+## Choose an interaction mode
+
+`ask` is the default in `cv_agent.yaml` and is best for an interactive terminal. It lets you review a proposed change, add guidance, reject a rollback, or save a named checkpoint at decision time.
+
+`auto` is suitable for CI, Docker, `tmux`, or an unattended server. Decisions are accepted automatically after the configured countdown. Auto mode does not ask for per-round guidance.
 
 ```bash
-docker run -dit --gpus '"device=0"' --name cv_agent_quick \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
-  cv_agent:latest --config cv_agent.quick.yaml run
-docker attach cv_agent_quick
+# Interactive review
+cv_agent --interaction ask run --data-yaml dataset.yaml
+
+# Unattended run
+cv_agent --interaction auto run --data-yaml dataset.yaml --max-rounds 20
 ```
 
-Or override flags on the default config:
+## How decisions work
+
+The first completed round establishes the run-local baseline. Later rounds are compared with the best historical score from the same experiment. The decision engine uses configured relative and optional absolute thresholds; with `dynamic_thresholds: true`, thresholds tighten as the run progresses.
+
+| Outcome | Meaning | Typical result |
+| --- | --- | --- |
+| Green | Meaningful improvement, or an accepted marginal improvement | Commit the improved checkpoint; make an Optuna proposal when applicable. |
+| Yellow | Near the baseline / possible local optimum | Make a conservative diagnostic adjustment or use the configured escape strategy. |
+| Red | Performance degradation | Apply recovery; hard Red may roll back to the best checkpoint. |
+
+After `red_escalation_count` consecutive Red outcomes (default: 3), the agent forces recovery, generates `data_gap_report.md` and `data_gap_report.json`, applies bounded loss-weight suggestions when available, and enters data-supplement handling.
+
+This classification is deterministic and metric-driven. An LLM can suggest bounded strategy patches or interpret user guidance, but it does not replace evaluation metrics or make checkpoint decisions.
+
+## Resume, checkpoints, and outputs
+
+Each experiment is written under `runs/exp_<timestamp>/`. Important contents include:
+
+| Path | Contents |
+| --- | --- |
+| `weights/` | Current YOLO weights and saved best snapshots. |
+| `checkpoints/` | Top-N leaderboard entries and manual checkpoints. |
+| `optuna_study.db` | Per-experiment Optuna study. |
+| `session_state.json` | Round number, parameters, best score, Red streak, and trial count needed for resume. |
+| `cv_agent.log` | Session log. |
+| `decision_log.json` / strategy artifacts | Decision and strategy audit trail. |
+| `final/best.pt` | Exported best model, with `final/summary.json`. |
+
+List available checkpoints:
 
 ```bash
-cvagent run --data-yaml coco128.yaml --model yolo26n --max-rounds 3
+cv_agent list-checkpoints
 ```
 
-Keep smoke-test settings in `cv_agent.quick.yaml`; keep `cv_agent.local.yaml` for local secrets only.
+Resume an interrupted experiment:
 
-### Train on your dataset
+```bash
+cv_agent resume --run-dir runs/exp_<timestamp>
+# Equivalent explicit form
+cv_agent run --start resume --run-dir runs/exp_<timestamp>
+```
+
+Create a new experiment from a saved checkpoint:
+
+```bash
+cv_agent list-checkpoints
+cv_agent run --start from-checkpoint --checkpoint-id <checkpoint-id>
+```
+
+Early stopping exports the best model when the target is met:
 
 ```bash
 cv_agent run \
   --data-yaml dataset.yaml \
-  --model yolo26s \
-  --max-rounds 10
+  --early-stop \
+  --early-stop-metric mAP50 \
+  --early-stop-target 0.75
 ```
 
-### Validate only
+Supported early-stop metrics are `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, and `mAP50_class:<class-name-or-id>`.
 
-```bash
-cv_agent validate --data-yaml dataset.yaml
-```
+## Configuration
 
----
+Configuration is YAML-based. Precedence is:
 
-## Running Locally
+1. Selected profile (`--config`, default `cv_agent.yaml`)
+2. Sibling local override (`<profile-name>.local.yaml`, if present)
+3. CLI options
 
-Use **Ask mode** (default) when you have an interactive terminal and want to review each round.
-
-```bash
-# Interactive startup wizard (fresh / resume / from-checkpoint)
-cv_agent run
-
-# Explicit options
-cv_agent run --interaction ask --data-yaml dataset.yaml --model yolo26n --max-rounds 5
-
-# Stop once validation mAP50 reaches 75%, then export final/best.pt
-cv_agent run --early-stop --early-stop-metric mAP50 --early-stop-target 0.75
-
-# Resume the same experiment
-cv_agent resume --run-dir runs/exp_<timestamp>
-
-# Fork a new experiment from a saved checkpoint
-cv_agent list-checkpoints
-cv_agent run --start from-checkpoint --checkpoint-id <ID>
-```
-
-**Local overrides** — copy the example and edit (git-ignored, never committed):
+For the default profile, the local override is `cv_agent.local.yaml`. It is ignored by Git and should contain secrets or machine-specific overrides only. Do not put credentials in tracked configuration files.
 
 ```bash
 cp cv_agent.local.yaml.example cv_agent.local.yaml
 ```
 
-Keep `cv_agent.local.yaml` for secrets only. Use `cv_agent.quick.yaml` for smoke-test settings and `cv_agent.yaml` for formal training settings.
-
-After each round in Ask mode you can:
-
-- Approve or reject the controller / Optuna proposal
-- Add **guidance** (natural language or regex phrases like `only lr`, `keep mosaic`)
-- See a **Guidance Applied** panel with parameter diff before continuing
-- Manually save a named checkpoint at the DECIDE prompt
-
----
-
-## Running on a Server
-
-Use **Auto mode** when there is no TTY (Docker, `nohup`, cron, SSH batch jobs).
-
-### Docker (recommended)
-
-On a GPU server with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed:
-
-```bash
-# Clone on the server (or copy the repo)
-git clone <your-repo-url>
-cd cv_agent
-
-# Build image (bundles cv_agent.yaml, cv_agent.quick.yaml, and dataset examples)
-docker build -t cv_agent:latest .
-mkdir -p runs datasets
-```
-
-**Config:** defaults come from **`cv_agent.yaml`** and target formal full-COCO training. Use **`cv_agent.quick.yaml`** for COCO128 smoke tests. Use **`cv_agent.local.yaml`** only for local secret overrides such as `llm.api_key`.
-
-**Multi-GPU (recommended on 8-GPU servers)** — expose 4 GPUs; add **`--shm-size=8g`** (NCCL/DDP needs more than Docker’s default 64MB `/dev/shm`):
-
-After pulling code changes, rebuild the image before starting a new container:
-
-```bash
-git pull
-docker build -t cv_agent:latest .
-```
-
-If a prior container name is already in use, inspect it first and remove it if it is stopped or no longer needed:
-
-```bash
-docker ps -a --filter name=cv_agent
-docker logs --tail 80 cv_agent_train
-docker rm cv_agent_train
-```
-
-**COCO128 smoke test:**
-
-```bash
-docker run -dit --gpus '"device=0"' --ipc=host --name cv_agent_smoke \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest --config cv_agent.quick.yaml run --device 0
-```
-
-```bash
-docker run -dit --gpus '"device=0,1,2,3"' --ipc=host --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  -e CV_AGENT_LLM_KEY="${CV_AGENT_LLM_KEY:-}" \
-  cv_agent:latest --interaction auto run --device 0,1,2,3
-```
-
-If NCCL still fails, try `--ipc=host` instead of/in addition to `--shm-size=8g`.
-
-Monitor or attach:
-
-```bash
-docker logs -f cv_agent_smoke
-docker logs -f cv_agent_train
-docker attach cv_agent_train
-```
-
-When attached, detach without stopping the job with `Ctrl-p`, then `Ctrl-q`.
-
-**Single GPU:**
-
-```bash
-docker run -dit --gpus '"device=0"' --name cv_agent_train \
-  -v "$(pwd)/runs:/app/runs" \
-  -v "$(pwd)/datasets:/app/datasets:ro" \
-  -v "$(pwd)/cv_agent.local.yaml:/app/cv_agent.local.yaml:ro" \
-  cv_agent:latest --interaction auto run --device 0
-```
-
-`device` in yaml: `auto` | `0` | `0,1,2,3` | `cpu`. CLI: `run --device 0,1,2,3`.
-
-| Mount / env | Purpose |
-|-------------|---------|
-| `-v .../runs:/app/runs` | Training artifacts, checkpoints, Optuna DB, `session_state.json` |
-| `-v .../datasets:/app/datasets:ro` | Reuse already downloaded COCO / custom datasets without container auto-downloads |
-| `-v .../cv_agent.local.yaml:...:ro` | **Optional** — only when the file exists; overrides selected keys |
-| `-v /host/datasets:/data:ro` | **Custom** dataset only — paths in yaml must use `/data/...` |
-| `-e CV_AGENT_LLM_KEY=...` | LLM key (preferred over putting secrets in local yaml) |
-| `--gpus '"device=0"'` | Expose one GPU on multi-GPU hosts |
-| `--shm-size=8g` | **Required for multi-GPU DDP** — avoids NCCL `No space left on device` on `/dev/shm` |
-
-> **Tip:** Paths in `dataset.yaml` must match **inside the container** (e.g. `path: /data/dataset`). See `dataset.yaml.example`.
-
-### 1. Prepare config (bare-metal / venv)
-
-Uses **`cv_agent.yaml` by default**. Create **`cv_agent.local.yaml` only if** you need to override keys or store a secret:
-
-```bash
-cp cv_agent.local.yaml.example cv_agent.local.yaml   # optional
-```
-
-Example local secret override:
-
 ```yaml
+# cv_agent.local.yaml
+device: "0"
+workers: 0
 llm:
-  api_key: "sk-..."   # or: export CV_AGENT_LLM_KEY="sk-..."
+  api_key: ""
 ```
 
-For smoke tests, pass `--config cv_agent.quick.yaml`. For formal full-COCO training, use the default `cv_agent.yaml`.
+The most useful top-level settings are:
 
-### 2. Set secrets via environment (recommended on servers)
+| Setting | Purpose |
+| --- | --- |
+| `model_variant`, `epochs_per_round`, `max_rounds` | Training scope. |
+| `device`, `workers`, `model_verbose` | Hardware and runtime behavior. |
+| `data` | Dataset YAML and validation thresholds. |
+| `initial_hyperparams` | Starting YOLO training parameters. |
+| `optuna` | Trial budget, Yellow escape strategy, and search ranges. |
+| `decision` | Green / Yellow / Red and escalation thresholds. |
+| `strategy` | Strategy-planner cadence, memory, and objective weights. |
+| `checkpoints`, `output_root` | Artifact retention and destination. |
+| `early_stop` | Stop-and-export target. |
+
+Supported model identifiers are `yolo26{n,s,m,l,x}`, `yolov8{n,s,m,l,x}`, and `yolo11{n,s,m,l,x}`.
+
+Use `--device auto`, `--device 0`, `--device 0,1,2,3`, or `--device cpu` to override device selection. On Windows, setting `workers: 0` is often the safest starting point.
+
+### Prioritize one class
+
+Use `--optimize-for` to weight one class's mAP@0.5 more heavily in the reward score.
 
 ```bash
-export CV_AGENT_LLM_KEY="sk-..."    # optional
-export DEEPSEEK_API_KEY="sk-..."   # alternative
+cv_agent run --data-yaml dataset.yaml --optimize-for vehicle
 ```
 
-### 3. Run
+The class must match a name in the dataset YAML. If it cannot be resolved, the agent warns and uses global metrics.
+
+## LLM integration
+
+LLM support is optional. The built-in adapter expects an OpenAI-compatible API and defaults to a DeepSeek endpoint in the provided profiles. Supply the key through an environment variable where possible:
 
 ```bash
-# Foreground (attach to tmux/screen first for long jobs)
-cv_agent run --interaction auto --max-rounds 10
-
-# Background with log file
-nohup cv_agent run --interaction auto \
-  --data-yaml dataset.yaml \
-  --model yolo26s \
-  --max-rounds 20 \
-  > train.log 2>&1 &
+export CV_AGENT_LLM_KEY="<your-key>"
+# DEEPSEEK_API_KEY is also recognized
 ```
 
-### 4. Monitor
+Ask mode can use the LLM to interpret natural-language constraints such as “only adjust lr” or “keep mosaic”. Regex and heuristic fallback handling remain available when no key is configured. API calls are bounded by `llm.max_calls_per_session`.
 
-- Tail the log: `tail -f train.log` or `tail -f runs/exp_<timestamp>/cv_agent.log`
-- MLflow UI (if configured): `mlflow ui --host 0.0.0.0 --port 5000`
-- Artifacts under `runs/exp_<timestamp>/`
+## MLflow
 
-### 5. Resume after interruption
+Set `mlflow_uri` and `experiment_name` in the selected profile to use a tracking server. For an HTTP(S) URI, the agent checks reachability before training. If it is unavailable, it uses a local file store at `./mlruns` instead; training continues and artifacts remain in the run directory.
+
+To inspect local tracking data:
 
 ```bash
-cv_agent resume --run-dir runs/exp_<timestamp>
-# or
-cv_agent run --start resume --run-dir runs/exp_<timestamp> --interaction auto
+mlflow ui --backend-store-uri ./mlruns
 ```
 
-Resume restores round number, hyperparameters, Optuna study, `red_streak`, and trial budget from `session_state.json`.
+## Docker
 
-> **Note:** Auto mode does not call the LLM for per-round guidance (no user input). LLM still runs on **3× Red escalation** if an API key is set.
-
----
-
-## CLI Reference
-
-```
-cvagent [--config PATH] [--interaction auto|ask] [--version] <command>
-# `cv_agent` works the same way for every command.
-
-Commands:
-  run               Start closed-loop training
-  validate          Dataset validation only
-  resume            Resume from a prior experiment directory
-  list-checkpoints  List Top-N, manual, and resumable checkpoints
-```
-
-### Global flags
-
-| Flag | Description |
-|------|-------------|
-| `-c, --config PATH` | Config file (default: `cv_agent.yaml`) |
-| `--interaction auto\|ask` | Override interaction mode |
-| `--version` | Print version |
-
-### `cvagent run` / `cv_agent run`
-
-| Option | Description |
-|--------|-------------|
-| `--data-yaml PATH` | Dataset YAML (COCO128 bootstrap if omitted) |
-| `--model TEXT` | Model variant (`yolo26s`, `yolov8m`, …) |
-| `--device TEXT` | CUDA devices: `auto`, `0`, `0,1,2,3`, `cpu` |
-| `--max-rounds INT` | Override `max_rounds` |
-| `--optimize-for TEXT` | Class name to prioritize in reward |
-| `--start fresh\|resume\|from-checkpoint` | Startup mode (skips wizard when set) |
-| `--run-dir PATH` | Experiment dir for `--start resume` |
-| `--checkpoint-id TEXT` | ID from `list-checkpoints` for `--start from-checkpoint` |
-| `--early-stop` | Enable stop-on-target and export the best model |
-| `--early-stop-metric TEXT` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
-| `--early-stop-target FLOAT` | Target in the inclusive range 0-1; also enables early stop |
-
-### `cv_agent resume`
-
-| Option | Description |
-|--------|-------------|
-| `-r, --run-dir PATH` | Path to prior `runs/exp_<timestamp>/` directory |
-
-### `cv_agent list-checkpoints`
-
-Lists Top-N, manual, and resumable experiment entries with IDs like `exp_<timestamp>:top:1`.
-
-**Supported model variants:** `yolo26{n,s,m,l,x}`, `yolov8{n,s,m,l,x}`, `yolo11{n,s,m,l,x}`.
-
----
-
-## Interaction Modes
-
-### Ask mode (default)
-
-| Capability | Behavior |
-|------------|----------|
-| Decision panel | Color, action, reason, proposed params, rollback hint |
-| Choices | Apply proposal, add guidance, skip changes, reject (Red), quit |
-| Guidance | Natural language (LLM if key set) or regex (`only lr`, `keep mosaic`, `不要改mosaic`) |
-| Guidance Applied panel | Shows parser source, interpretation, and param diff; pauses for Enter |
-| Config confirm | Second diff review before params are applied |
-| Manual checkpoint | Optional named save at DECIDE prompt |
-
-### Auto mode
-
-| Capability | Behavior |
-|------------|----------|
-| Decisions | Auto-approved after countdown (`auto_prompt_seconds`, default 10s) |
-| Countdown keys | `A` → switch to Ask for this round; `Q` → quit |
-| Guidance | Not collected (no blocking prompts) |
-| Data errors | Writes supplement scripts and exits |
-
-Switch **Ask ↔ Auto per round** at the DECIDE checkpoint; choice persists in `session_state.json`.
-
----
-
-## Decision System
-
-Score is compared to the **historical best** each round (`delta_percent` and optional `delta_abs`).
-
-Green / Yellow / Red is a deterministic numeric classification from the rule controller, not an LLM judgment. The LLM can influence later proposals through bounded strategy patches and Ask-mode guidance, but it does not overwrite the measured round score used for rollback, checkpointing, or the decision timeline.
-
-| State | Condition (vs. best) | Typical action |
-|-------|----------------------|----------------|
-| **Green (hard)** | Δ% ≥ `green_threshold_pct` or Δ_abs ≥ `green_threshold_abs` | Commit checkpoint; Optuna Bayesian proposal |
-| **Green (marginal)** | `0 < Δ% < green_threshold` when `accept_marginal_improvement: true` | Commit checkpoint; keep params unless `marginal_green_use_optuna: true` |
-| **Yellow** | Between `soft_red_threshold_pct` and green thresholds | Mild regularize/LR if overfit/underfit; else Optuna escape |
-| **Red (soft)** | `soft_red_threshold_pct` ≥ Δ% > `red_threshold_pct` | Mild recovery **without** rollback |
-| **Red (hard)** | Δ% ≤ `red_threshold_pct` or Δ_abs ≤ `red_threshold_abs` | Rollback + rule recovery (overfit / underfit / general) |
-
-The **first round** establishes the run-local baseline and is auto-accepted without an interactive review. Official or published model metrics are useful external references, but they are not used as historical best because this loop needs apples-to-apples scores from the same dataset, epochs, device, and evaluation path.
-
-When `dynamic_thresholds: true`, the effective thresholds are selected by training progress (`round_num / max_rounds`): exploration until 34%, exploitation until 75%, then convergence. Early rounds tolerate larger drops; convergence accepts smaller gains and treats smaller drops as risky. Recent median and volatility guards reduce hard-Red overreaction when recent scores are noisy or the current round matches recent performance.
-
-**Diagnostic routing:** overfitting or underfitting in Yellow / soft-Red triggers targeted mild adjustments instead of blind random-walk escape.
-
-### Red escalation (3× consecutive Reds)
-
-When `red_escalation_count` is reached:
-
-1. Force rollback to best checkpoint
-2. LLM or heuristic confusion-matrix analysis
-3. Apply suggested `box` / `cls` / `dfl` loss weights once (clamped 0.1–20)
-4. Write `data_gap_report.md` / `.json`
-5. Enter **Data Supplement Mode**
-
-`yellow_resets_red_count: true` resets the Red streak after Yellow.
-
----
-
-## Hyperparameter Optimization
-
-| Round color | Strategy |
-|-------------|----------|
-| Green (hard) | Optuna TPE via `study.ask()` / `study.tell()` |
-| Green (marginal) | Keep current params by default (`marginal_green_use_optuna: false`) |
-| Yellow (escape) | `yellow_strategy`: `random_walk` (default), `simulated_annealing`, `bayesian` |
-| Yellow / soft-Red (diagnostic) | Rule-based mild param adjust |
-| Red | Rule recovery; pending Optuna trials abandoned |
-
-**Key behaviors:**
-
-- Per-run `optuna_study.db` under the experiment directory
-- `n_trials` caps `ask()` calls; counter syncs with DB on resume
-- `pruner: none` recommended — one `tell()` per round, so Median/Hyperband pruners have no effect
-- Mismatched executed params mark the trial `FAIL`
-- Search space fully configurable in YAML
-
-Legacy `search_strategy: random_walk|simulated_annealing` maps to Yellow escape when non-Bayesian.
-
----
-
-## AI Strategy Planner
-
-The LLM strategy planner does not emit exact training hyperparameters. It emits bounded strategy patches: search-space narrowing, frozen fields, objective weights, and phase selection. Optuna still proposes precise numeric values inside those validated bounds, keeping numeric optimization auditable while using the LLM for diagnosis and strategy selection.
-
-Planner objective weights are logged as strategy context for Optuna and memory, but the decision score remains the raw training reward. This keeps rollback comparisons stable even when the strategy planner changes its weighting emphasis.
-
-Strategy runs persist `strategy_memory.json` for useful and avoid patterns across rounds, `strategy_log.json` for planner decisions, and the current `active_strategy_patch` in `session_state.json` so resumed experiments continue with the same constraints.
-
----
-
-## Checkpoints & Resume
-
-### Experiment layout
-
-```
-runs/exp_<timestamp>/
-├── weights/
-│   ├── best.pt
-│   └── last.pt
-├── best_snapshots/          # immutable per-round copies for rollback
-├── checkpoints/
-│   ├── top/                 # score-ranked Top-N
-│   └── manual/              # user-named saves
-├── optuna_study.db
-├── session_state.json       # resume: round, params, red_streak, optuna_trial_count
-├── metrics.json
-├── decision_log.json
-├── results.csv
-└── cv_agent.log
-```
-
-### Three ways to continue training
-
-| Mode | Command | What it does |
-|------|---------|--------------|
-| **Fresh** | `cv_agent run` | New `exp_*` from Ultralytics pretrained weights (`model_variant.pt`) |
-| **Resume** | `cv_agent resume --run-dir runs/exp_<timestamp>` | Same directory; restores full session state |
-| **Fork** | `cv_agent run --start from-checkpoint --checkpoint-id <ID>` | New `exp_*` fine-tuning from Top-N or manual save |
+The supplied Dockerfile uses the Ultralytics image and exposes the CLI as its entrypoint.
 
 ```bash
-cv_agent list-checkpoints
-cv_agent run --start from-checkpoint --checkpoint-id exp_<timestamp>:top:1
+docker build -t cv_agent:latest .
+
+docker run --rm -it --gpus '"device=0"' \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "$(pwd)/datasets:/app/datasets" \
+  -v "$(pwd)/cv_agent.quick.yaml:/app/cv_agent.quick.yaml:ro" \
+  cv_agent:latest --config cv_agent.quick.yaml run
 ```
 
-Training stops when `round_num >= max_rounds`. Raise `max_rounds` or resume with updated config for more rounds.
-
----
-
-## Model Weights & Export
-
-| Artifact | Location |
-|----------|----------|
-| Best weights | `runs/exp_<timestamp>/weights/best.pt` |
-| Last weights | `runs/exp_<timestamp>/weights/last.pt` |
-| Top-N library | `runs/exp_<timestamp>/checkpoints/top/` |
-
-There is **no** built-in `cv_agent export` command. To export ONNX / TensorRT / etc., use Ultralytics directly:
-
-```python
-from ultralytics import YOLO
-YOLO("runs/exp_<timestamp>/weights/best.pt").export(format="onnx")
-```
-
-**From scratch training** (no pretrained weights) is not supported — fresh runs always load official `{model_variant}.pt` COCO pretrained weights. To start from custom weights, save them as a checkpoint and use `--start from-checkpoint`.
-
----
-
-## Dataset Validation & Supplement
-
-`DatasetValidator` checks at startup:
-
-- `min_images`, `min_ann_per_class`, `min_pixel_area`
-- Image ↔ label pairing
-- Optional `validate_brightness`, `validate_angles`
-
-| Severity | Behavior |
-|----------|----------|
-| **error** | Data Supplement Mode |
-| **warning** | Log and continue |
-
-**Data Supplement Mode** (validation errors or 3× Red) generates scripts under `supplement_scripts/`. Run them manually, fix data, then re-run or retry validation.
-
----
-
-## Single-Class Optimization
+For a custom dataset, mount it and use paths valid inside the container:
 
 ```bash
-cv_agent run --data-yaml dataset.yaml --optimize-for person
+docker run --rm -it --gpus '"device=0"' \
+  -v "$(pwd)/runs:/app/runs" \
+  -v "/host/path/to/dataset:/data:ro" \
+  -v "$(pwd)/dataset.yaml:/app/dataset.yaml:ro" \
+  cv_agent:latest --interaction auto run --data-yaml /app/dataset.yaml --device 0
 ```
 
-```
-reward = 0.3 × global_mAP50 + 1.7 × target_class_mAP50   # when --optimize-for set
-reward = global_mAP50                                       # otherwise
-```
-
-Evaluation prints a **compact per-class summary** (count, avg, min/max, worst/best classes with names) instead of listing every class.
-
----
-
-## Configuration Reference
-
-Settings load from **`cv_agent.yaml`** (tracked). If present, **`cv_agent.local.yaml`** (git-ignored) deep-merges on top — include only keys you want to override (typically `llm.api_key`). CLI flags override YAML. No local file is required.
-
-### Training loop
-
-For early stopping, explicit CLI options take precedence over the interactive startup choice, followed by `cv_agent.local.yaml`, then `cv_agent.yaml`. Interactive choices apply only to the current run. Non-interactive runs never prompt and use the YAML/CLI values directly.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `model_variant` | `yolo26s` | Ultralytics model slug |
-| `epochs_per_round` | `50` | Epochs per closed-loop round |
-| `max_rounds` | `6` | Total rounds before stop |
-| `device` | `auto` | `auto` (all visible GPUs), `0`, `0,1,2,3`, or `cpu` |
-| `workers` | `8` (Linux) | DataLoader workers (`0` on Windows if unset) |
-| `model_verbose` | `false` | Set `true` only when you need full Ultralytics model/training detail output |
-| `interaction_mode` | `ask` | `ask` or `auto` |
-| `auto_prompt_seconds` | `10` | Auto mode countdown before approving a round |
-| `optimize_for_class` | `null` | Class name for weighted reward |
-| `output_root` | `runs` | Parent directory for experiments |
-| `experiment_name` | `cv_agent` | MLflow experiment name |
-| `mlflow_uri` | `http://localhost:5000` | MLflow tracking URI |
-
-### `data`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `data_yaml` | `coco.yaml` | Dataset spec path (Ultralytics registry; auto-download) |
-| `min_images` | `50` | Minimum images per split |
-| `min_ann_per_class` | `1` | Minimum annotations per class |
-| `min_pixel_area` | `64` | Minimum object area (pixels) |
-| `validate_brightness` | `true` | Brightness diversity heuristic |
-| `validate_angles` | `true` | Angle diversity heuristic |
-
-### `initial_hyperparams`
-
-Starting YOLO training args for round 1 (and fallback). Includes `lr0`, `lrf`, `batch`, `momentum`, `weight_decay`, warmup, loss weights (`box`, `cls`, `dfl`), and augmentation (`mosaic`, `mixup`, `hsv_*`, `degrees`, …). See `cv_agent.yaml` for the full list.
-
-### `decision`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `green_threshold_pct` | `3.0` | Hard Green if Δ% ≥ this |
-| `green_threshold_abs` | `null` | Hard Green if absolute Δ score ≥ this (optional) |
-| `red_threshold_pct` | `-5.0` | Hard Red if Δ% ≤ this |
-| `red_threshold_abs` | `null` | Hard Red if absolute Δ score ≤ this (optional) |
-| `soft_red_threshold_pct` | `-3.0` | Soft Red lower bound |
-| `accept_marginal_improvement` | `true` | Treat small positive Δ% as marginal Green |
-| `marginal_green_use_optuna` | `false` | Run Optuna on marginal Green rounds |
-| `red_escalation_count` | `3` | Consecutive Reds before data-gap escalation |
-| `yellow_resets_red_count` | `true` | Yellow round resets Red streak |
-| `dynamic_thresholds` | `true` | Use progress-based exploration / exploitation / convergence thresholds |
-| `phase_schedule.*` | see yaml | Percent cutoffs based on `round_num / max_rounds` |
-| `dynamic.*` | see yaml | Per-phase Green / soft-Red / hard-Red thresholds |
-| `recent_window` | `3` | Number of recent scores for median and volatility guards |
-| `use_recent_median` | `true` | Downgrade hard Red to Yellow when current score matches recent median |
-| `volatility_relaxation_enabled` | `true` | Relax Red thresholds during noisy recent performance |
-
-### `optuna`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `n_trials` | `50` | Max `ask()` calls per session |
-| `search_strategy` | `bayesian` | Legacy; non-Bayesian values map to Yellow escape |
-| `yellow_strategy` | `random_walk` | Yellow escape: `random_walk`, `simulated_annealing`, `bayesian` |
-| `n_startup_trials` | `10` | TPE random startup trials |
-| `pruner` | `none` | `none` recommended; `median` / `hyperband` ineffective here |
-| `random_walk_min_step_scale` | `0.02` | Floor for Yellow random-walk step size |
-| `search_space.*` | see yaml | Per-param ranges; `batch` is a categorical list |
-
-### `strategy`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `true` | Run the AI strategy planner before Optuna proposals |
-| `planner_cadence` | `1` | Plan every N rounds |
-| `min_confidence` | `0.35` | Ignore planner patches below this confidence |
-| `memory_enabled` | `true` | Persist strategy memory between rounds and resumes |
-| `max_memory_items` | `50` | Maximum remembered effective / avoid patterns |
-| `objective_weights.*` | see yaml | Reward weights for mAP, recall, precision, overfit, and cost |
-
-### `checkpoints`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `top_n` | `5` | Leaderboard size |
-| `auto_save_top` | `true` | Auto-record Top-N after each round |
-| `manual_save_dir` | `manual` | Subdir for named manual saves |
-
-### `llm`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `api_base` | DeepSeek URL | OpenAI-compatible API base |
-| `api_key` | `""` | Leave empty; use env var or `cv_agent.local.yaml` |
-| `model` | `deepseek-v4-flash` | Chat model name |
-| `max_tokens` | `4096` | Max response tokens |
-| `temperature` | `0.3` | Sampling temperature |
-| `max_calls_per_session` | `20` | LLM call budget per run |
-| `guidance_enabled` | `true` | Parse Ask-mode feedback via LLM |
-| `guidance_fallback_regex` | `true` | Fall back to regex if LLM fails |
-
-### `early_stop`
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `false` | Stop after a round reaches the target metric |
-| `metric` | `mAP50` | `score`, `mAP50`, `mAP50_95`, `precision`, `recall`, or `mAP50_class:<name-or-id>` |
-| `target` | `1.0` | Stop when metric value is greater than or equal to this value (75% is `0.75`) |
-| `save_best_on_stop` | `true` | Export the best known checkpoint to `runs/exp_*/final/best.pt` and write `final/summary.json` |
-
-### Minimal config example
-
-```yaml
-model_variant: yolo26s
-epochs_per_round: 50
-max_rounds: 10
-interaction_mode: auto
-
-data:
-  data_yaml: dataset.yaml
-  min_images: 100
-  min_ann_per_class: 10
-
-decision:
-  accept_marginal_improvement: true
-  marginal_green_use_optuna: false
-
-optuna:
-  n_trials: 50
-  pruner: none
-  yellow_strategy: random_walk
-
-llm:
-  guidance_enabled: true
-
-early_stop:
-  enabled: true
-  metric: mAP50_class:car
-  target: 0.75
-```
-
-> Ultralytics uses `optimizer=auto` so `lr0` scales appropriately for the chosen optimizer (e.g. AdamW vs SGD).
-
----
-
-## LLM Integration
-
-Default backend: **DeepSeek** (OpenAI-compatible). Change `api_base` and `model` for other providers.
-
-| Trigger | What the LLM does |
-|---------|-------------------|
-| **Ask-mode guidance** | Parses user feedback into frozen fields, multipliers, and set-values; shows diff panel |
-| **Red×3 escalation** | Confusion-matrix analysis, data-gap report, loss-weight suggestions |
-
-Normal rounds use the rule controller + Optuna. Without an API key, guidance falls back to regex rules; Red×3 uses heuristic analysis.
-
----
-
-## MLflow Tracking
-
-Point `mlflow_uri` at a running server, or let `cv_agent` fall back to `./mlruns` if unreachable.
-
-```bash
-mlflow ui --host 0.0.0.0 --port 5000
-```
-
-`mlruns/` is git-ignored.
-
----
-
-## Project Layout
-
-```
-cv_agent/
-├── cv_agent.yaml              # default config (tracked)
-├── cv_agent.local.yaml.example
-├── coco128.yaml               # demo dataset spec
-├── dataset.yaml.example       # custom dataset template (container paths)
-├── Dockerfile                 # GPU image for server deployment
-├── pyproject.toml
-├── src/cv_agent/
-│   ├── cli/                   # Click CLI
-│   ├── core/                  # engine, config, state machine
-│   ├── data/                  # validation, supplement, bootstrap
-│   ├── decision/              # three-state, Optuna, LLM, guidance
-│   ├── interaction/           # ask/auto handlers
-│   ├── tracking/              # checkpoints, MLflow, run dirs
-│   ├── trainer/               # YOLO trainer, evaluator
-│   └── ui/                    # Rich console, live panel
-└── tests/
-```
-
----
+For multi-GPU DDP, expose the desired GPUs and provide shared memory, for example `--ipc=host` or `--shm-size=8g`. Do not mount `cv_agent.local.yaml` unless the file exists on the host; Docker otherwise creates a directory at that path.
 
 ## Development
 
 ```bash
-pytest tests/ --basetemp=.tmp_pytest -p no:cacheprovider
+python -m pytest
 ruff check src tests
 ```
 
-Enable the pre-commit secret scanner:
+The test suite covers configuration, the decision engine, optimizer flow, state persistence, checkpoint handling, CLI behavior, and terminal presentation.
 
-```bash
-git config core.hooksPath .githooks
+## Project layout
+
+```text
+src/cv_agent/
+  cli/          Command-line entry points
+  core/         Configuration, state machine, training orchestrator
+  data/         Dataset bootstrap, validation, supplement and gap reports
+  decision/     Decisions, Optuna, strategy and LLM guidance
+  interaction/  Ask and auto workflows
+  tracking/     Run directories, checkpoints and MLflow
+  trainer/      YOLO execution, evaluation, devices and early stopping
+tests/          Automated tests
 ```
-
----
-
-## Security
-
-**Never commit real API keys.**
-
-| Priority | Method |
-|----------|--------|
-| 1 | `export CV_AGENT_LLM_KEY="sk-..."` or `export DEEPSEEK_API_KEY="sk-..."` |
-| 2 | `cv_agent.local.yaml` (git-ignored) |
-| 3 | Empty `api_key` → no LLM calls |
-
-The `.githooks/pre-commit` hook blocks commits that match common secret patterns.
-
----
 
 ## License
 
-MIT — see `pyproject.toml`.
+MIT. See the package metadata in [pyproject.toml](./pyproject.toml).
